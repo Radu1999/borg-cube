@@ -14,6 +14,7 @@ from src.config import BorgConfig
 from src.data.conllu import Sentence, Token
 from src.data.dataset import TaggerDataset, _build_vocab, _feats_to_str
 from src.models.base import BorgBaseModel
+from src.models.evaluation import evaluate_predictions, print_validation_metrics
 
 
 class TaggerModel(BorgBaseModel):
@@ -88,12 +89,7 @@ class TaggerModel(BorgBaseModel):
             train_sentences, config.model_name, config.max_seq_length,
             upos_vocab, xpos_vocab, feats_vocab,
         )
-        dev_ds = TaggerDataset(
-            dev_sentences, config.model_name, config.max_seq_length,
-            upos_vocab, xpos_vocab, feats_vocab,
-        )
         train_loader = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True)
-        dev_loader = DataLoader(dev_ds, batch_size=config.eval_batch_size)
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
         total_steps = len(train_loader) * config.num_epochs
@@ -137,24 +133,12 @@ class TaggerModel(BorgBaseModel):
 
             avg_loss = total_loss / len(train_loader)
 
-            # Validation (UPOS accuracy)
-            model.eval()
-            correct = total = 0
-            with torch.no_grad():
-                for batch in dev_loader:
-                    input_ids = batch["input_ids"].to(device)
-                    attention_mask = batch["attention_mask"].to(device)
-                    upos_lbl = batch["upos_labels"].to(device)
-                    u_logits, _, _ = model(input_ids, attention_mask)
-                    preds = u_logits.argmax(-1)
-                    mask = upos_lbl != -100
-                    correct += (preds[mask] == upos_lbl[mask]).sum().item()
-                    total += mask.sum().item()
-
-            acc = correct / max(total, 1)
-            print(f"  loss={avg_loss:.4f}  dev_upos_acc={acc:.4f}")
-            if acc > best_acc:
-                best_acc = acc
+            metrics = evaluate_predictions(dev_sentences, model.predict(dev_sentences))
+            print(f"  loss={avg_loss:.4f}")
+            print_validation_metrics(metrics, ["UPOS", "XPOS", "FEATS"])
+            upos_f1 = metrics["UPOS"].f1
+            if upos_f1 > best_acc:
+                best_acc = upos_f1
                 model.save(model_path)
 
         return model
