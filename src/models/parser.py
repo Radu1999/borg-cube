@@ -198,7 +198,7 @@ class ParserModel(BorgBaseModel):
                     loss=f"{loss.item():.4f}",
                     arc_loss=f"{arc_loss.item():.4f}",
                     rel_loss=f"{rel_loss.item():.4f}",
-                    avg_loss=f"{total_loss / progress.n:.4f}",
+                    avg_loss=f"{total_loss / max(progress.n, 1):.4f}",
                     lr=f"{scheduler.get_last_lr()[0]:.2e}",
                 )
 

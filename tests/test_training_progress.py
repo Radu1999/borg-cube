@@ -50,6 +50,28 @@ class TestTrainingProgress(unittest.TestCase):
                     f"{component} is missing metrics: {expected - actual}",
                 )
 
+    def test_avg_loss_division_is_zero_safe(self):
+        """avg_loss must not divide by progress.n directly, which is 0 on the
+        first batch of every epoch and raises ZeroDivisionError."""
+        components = ["tokenizer", "tagger", "parser", "lemmatizer"]
+
+        for component in components:
+            with self.subTest(component=component):
+                path = os.path.join(ROOT, "src", "models", f"{component}.py")
+                with open(path, encoding="utf-8") as source_file:
+                    source = source_file.read()
+
+                self.assertNotIn(
+                    "total_loss / progress.n",
+                    source,
+                    f"{component} divides by progress.n unsafely, causing ZeroDivisionError",
+                )
+                self.assertIn(
+                    "total_loss / max(progress.n, 1)",
+                    source,
+                    f"{component} does not guard avg_loss division against progress.n == 0",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
