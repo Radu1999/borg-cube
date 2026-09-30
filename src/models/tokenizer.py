@@ -116,17 +116,50 @@ class TokenizerModel(BorgBaseModel):
         encoding = hf_tok(
             text,
             return_offsets_mapping=True,
-            max_length=self.config.max_seq_length,
-            truncation=True,
-            return_tensors="pt",
+            add_special_tokens=False,
         )
-        offset_mapping = encoding.pop("offset_mapping").squeeze(0)
-        input_ids = encoding["input_ids"].to(device)
-        attention_mask = encoding["attention_mask"].to(device)
+        token_ids = encoding["input_ids"]
+        offset_mapping = encoding["offset_mapping"]
+        max_seq_length = min(
+            self.config.max_seq_length,
+            self.encoder.config.max_position_embeddings,
+        )
+        special_tokens = hf_tok.num_special_tokens_to_add(pair=False)
+        window_size = max_seq_length - special_tokens
+        if window_size < 1:
+            raise ValueError("max_seq_length must leave room for at least one token")
+
+        overlap = min(window_size // 4, window_size - 1)
+        window_step = window_size - overlap
+        score_sums = torch.zeros((len(token_ids), self.NUM_LABELS))
+        score_counts = torch.zeros(len(token_ids))
 
         with torch.no_grad():
-            logits = self(input_ids, attention_mask)  # (1, L, C)
-        preds = logits.squeeze(0).argmax(-1).cpu().tolist()
+            for window_start in range(0, len(token_ids), window_step):
+                window_end = min(window_start + window_size, len(token_ids))
+                window_ids = token_ids[window_start:window_end]
+                model_inputs = hf_tok.prepare_for_model(
+                    window_ids,
+                    add_special_tokens=True,
+                    return_attention_mask=True,
+                )
+                input_ids = torch.tensor([model_inputs["input_ids"]], device=device)
+                attention_mask = torch.tensor(
+                    [model_inputs["attention_mask"]], device=device
+                )
+                logits = self(input_ids, attention_mask).squeeze(0).cpu()
+
+                special_mask = hf_tok.get_special_tokens_mask(
+                    window_ids, already_has_special_tokens=False
+                )
+                content_index = window_start
+                for model_index, is_special in enumerate(special_mask):
+                    if not is_special:
+                        score_sums[content_index] += logits[model_index]
+                        score_counts[content_index] += 1
+                        content_index += 1
+
+        preds = (score_sums / score_counts.unsqueeze(1)).argmax(-1).tolist()
 
         sentences: List[Sentence] = []
         current_sentence: Optional[Sentence] = None
@@ -136,7 +169,7 @@ class TokenizerModel(BorgBaseModel):
         # track the end of the last processed subword to detect whitespace
         last_end = 0
 
-        for i, (start, end) in enumerate(offset_mapping.tolist()):
+        for i, (start, end) in enumerate(offset_mapping):
             if start == 0 and end == 0:
                 continue  # special token
 
