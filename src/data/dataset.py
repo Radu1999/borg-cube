@@ -85,8 +85,17 @@ class TokenizerDataset(Dataset):
                         lbl = self.CONTINUATION
                     sentence_text += ch
                     sentence_labels.append(lbl)
-                # Add space between tokens (except last)
+
+                # Handle SpaceAfter: add actual whitespace from the Token if available
                 if tok_idx < len(tokens) - 1:
+                    if tok.space_after:
+                        sentence_text += " "
+                        sentence_labels.append(self.CONTINUATION)
+                    else:
+                        # No space between tokens (e.g. "don't" -> "do", "'t")
+                        pass
+                elif tok.space_after:
+                    # Trailing space at the end of the sentence
                     sentence_text += " "
                     sentence_labels.append(self.CONTINUATION)
 

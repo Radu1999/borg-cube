@@ -25,7 +25,7 @@ class BorgBaseModel(nn.Module):
         self.hf_tokenizer = AutoTokenizer.from_pretrained(config.model_name)
         self.encoder = AutoModel.from_pretrained(config.model_name)
         adapters.init(self.encoder)
-        pfeiffer_cfg = adapters.PfeifferConfig(reduction_factor=6)
+        pfeiffer_cfg = adapters.SeqBnConfig(reduction_factor=6)
         self.encoder.add_adapter(component, config=pfeiffer_cfg)
         self.encoder.set_active_adapters(component)
         self.encoder.train_adapter(component)

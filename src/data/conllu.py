@@ -26,6 +26,7 @@ class Token:
     deprel: str = "_"
     deps: str = "_"
     misc: str = "_"
+    space_after: bool = True
 
     # Convenience helpers
     def is_multiword(self) -> bool:
@@ -43,6 +44,18 @@ class Token:
 
     def __str__(self) -> str:
         head_str = str(self.head) if self.head is not None else "_"
+
+        # Handle SpaceAfter in misc column: only write SpaceAfter=No
+        misc_val = self.misc if self.misc != "_" else ""
+        if not self.space_after:
+            space_attr = "SpaceAfter=No"
+            if misc_val:
+                misc_final = f"{misc_val},{space_attr}" if "," not in misc_val else f"{misc_val},{space_attr}"
+            else:
+                misc_final = space_attr
+        else:
+            misc_final = misc_val
+
         return "\t".join([
             str(self.id),
             self.form,
@@ -53,7 +66,7 @@ class Token:
             head_str,
             self.deprel,
             self.deps,
-            self.misc,
+            misc_final,
         ])
 
 
@@ -137,6 +150,14 @@ def read_conllu(path: str) -> List[Sentence]:
                 parts = line.split("\t")
                 if len(parts) != 10:
                     continue  # skip malformed lines
+
+                misc = parts[9]
+                space_after = True
+                if "SpaceAfter=No" in misc:
+                    space_after = False
+                elif "SpaceAfter=Yes" in misc:
+                    space_after = True
+
                 tok = Token(
                     id=_parse_id(parts[0]),
                     form=parts[1],
@@ -147,7 +168,8 @@ def read_conllu(path: str) -> List[Sentence]:
                     head=_parse_head(parts[6]),
                     deprel=parts[7],
                     deps=parts[8],
-                    misc=parts[9],
+                    misc=misc,
+                    space_after=space_after,
                 )
                 current_tokens.append(tok)
 

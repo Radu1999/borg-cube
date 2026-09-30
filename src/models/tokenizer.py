@@ -108,7 +108,7 @@ class TokenizerModel(BorgBaseModel):
 
     # ------------------------------------------------------------------
     def predict(self, text: str) -> List[Sentence]:
-        """Segment *text* into sentences and tokens."""
+        """Segment *text* into sentences and tokens, preserving whitespace."""
         device = self.config.resolve_device()
         self.eval()
 
@@ -133,21 +133,39 @@ class TokenizerModel(BorgBaseModel):
         current_form_chars: List[str] = []
         current_token_id = 1
 
+        # track the end of the last processed subword to detect whitespace
+        last_end = 0
+
         for i, (start, end) in enumerate(offset_mapping.tolist()):
             if start == 0 and end == 0:
                 continue  # special token
+
             label = preds[i]
             subword = text[start:end]
 
+            # Detect whitespace before this token/subword
+            # If there is text between last_end and start, it's whitespace
+            whitespace_before = text[last_end:start]
+
             if label == TokenizerDataset.SENTENCE_START:
-                # Flush any pending token
+                # Flush any pending token from the previous sentence
                 if current_form_chars and current_sentence is not None:
+                    # The token that just ended has space_after if there was whitespace before this new sentence
+                    # or if we are at the end of the text (handled at final flush)
+                    # However, for SENTENCE_START, we check if whitespace exists before the start of the sentence
+                    # and also consider if the previous token ended with whitespace.
+
+                    # Special case: the very first token of the whole text has no "previous" token to mark space_after
+                    # but the token we are flushing DOES have a space_after if whitespace precedes the current SENTENCE_START.
+                    has_space = len(whitespace_before) > 0
                     current_sentence.tokens.append(
-                        Token(id=current_token_id, form="".join(current_form_chars))
+                        Token(id=current_token_id, form="".join(current_form_chars), space_after=has_space)
                     )
+
                 # Flush old sentence
                 if current_sentence is not None and current_sentence.tokens:
                     sentences.append(current_sentence)
+
                 current_sentence = Sentence()
                 current_form_chars = [subword]
                 current_token_id = 1
@@ -156,23 +174,36 @@ class TokenizerModel(BorgBaseModel):
                 if current_sentence is None:
                     current_sentence = Sentence()
                     current_token_id = 1
+
                 if current_form_chars:
+                    # Token ends here. It has space_after if whitespace exists before this new token.
+                    has_space = len(whitespace_before) > 0
                     current_sentence.tokens.append(
-                        Token(id=current_token_id, form="".join(current_form_chars))
+                        Token(id=current_token_id, form="".join(current_form_chars), space_after=has_space)
                     )
                     current_token_id += 1
+
                 current_form_chars = [subword]
 
             else:  # CONTINUATION
                 if current_sentence is None:
                     current_sentence = Sentence()
                     current_token_id = 1
+
+                # If we have a continuation but there was whitespace before it,
+                # this is technically a model error (continuation should be adjacent),
+                # but we should handle it by treating the whitespace as part of the previous token's space_after.
+                # For now, we just append the subword.
                 current_form_chars.append(subword)
+
+            last_end = end
 
         # Flush remaining
         if current_form_chars and current_sentence is not None:
+            # Check if there's whitespace at the very end of the text
+            has_space = len(text[last_end:]) > 0
             current_sentence.tokens.append(
-                Token(id=current_token_id, form="".join(current_form_chars))
+                Token(id=current_token_id, form="".join(current_form_chars), space_after=has_space)
             )
         if current_sentence is not None and current_sentence.tokens:
             sentences.append(current_sentence)
