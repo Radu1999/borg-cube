@@ -139,7 +139,7 @@ class LemmatizerModel(BorgBaseModel):
                 total_loss += loss.item()
                 progress.set_postfix(
                     loss=f"{loss.item():.4f}",
-                    avg_loss=f"{total_loss / progress.n:.4f}",
+                    avg_loss=f"{total_loss / max(progress.n, 1):.4f}",
                     lr=f"{scheduler.get_last_lr()[0]:.2e}",
                 )
 

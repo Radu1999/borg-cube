@@ -131,7 +131,7 @@ class TaggerModel(BorgBaseModel):
                     upos_loss=f"{upos_loss.item():.4f}",
                     xpos_loss=f"{xpos_loss.item():.4f}",
                     feats_loss=f"{feats_loss.item():.4f}",
-                    avg_loss=f"{total_loss / progress.n:.4f}",
+                    avg_loss=f"{total_loss / max(progress.n, 1):.4f}",
                     lr=f"{scheduler.get_last_lr()[0]:.2e}",
                 )
 
