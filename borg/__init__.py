@@ -2,8 +2,8 @@
 
 Usage::
 
-    from borg import Cube
-    nlp = Cube(lang='en')
+    from borg import cube
+    nlp = cube('en')
     sentences = nlp("The cat sat on the mat.")
     print(sentences)
 """
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 from typing import List, Optional
+from urllib.parse import unquote
 
 from src.config import BorgConfig
 from src.data.conllu import Sentence
@@ -52,7 +53,7 @@ class Cube:
             config = BorgConfig(lang=lang)
         self.config = config
 
-        components = components or self.DEFAULT_COMPONENTS
+        components = self.DEFAULT_COMPONENTS if components is None else components
 
         self.pipeline = BorgPipeline(config)
         for component in components:
@@ -71,3 +72,22 @@ class Cube:
             if getattr(self.pipeline, f"{c}_model") is not None
         ]
         return f"Cube(lang={self.lang!r}, loaded={loaded})"
+
+
+def cube(
+    model: str,
+    components: Optional[List[str]] = None,
+    config: Optional[BorgConfig] = None,
+) -> Cube:
+    """Load a model by name or from a local ``file://`` model folder.
+
+    Named models are loaded from ``~/.borg_cube/<model>/``. Local folders
+    should contain one subdirectory per component.
+    """
+    if model.startswith("file://"):
+        model_path = unquote(model[len("file://"):])
+        if not model_path:
+            raise ValueError("A file:// model URI must include a folder path")
+        lang = os.path.basename(os.path.normpath(model_path)) or "en"
+        return Cube(lang=lang, model_path=model_path, components=components, config=config)
+    return Cube(lang=model, components=components, config=config)

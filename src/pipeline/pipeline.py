@@ -44,25 +44,26 @@ class BorgPipeline:
         dev_file: str,
         model_path: str,
     ) -> None:
-        """Train a single component and save it to *model_path*."""
+        """Train a component and save it under *model_path/<component>*."""
         train_sentences = read_conllu(train_file)
         dev_sentences = read_conllu(dev_file)
+        component_path = os.path.join(model_path, component)
 
         if component == "tokenizer":
             from src.models.tokenizer import TokenizerModel
-            TokenizerModel.train_model(train_sentences, dev_sentences, self.config, model_path)
+            TokenizerModel.train_model(train_sentences, dev_sentences, self.config, component_path)
 
         elif component == "tagger":
             from src.models.tagger import TaggerModel
-            TaggerModel.train_model(train_sentences, dev_sentences, self.config, model_path)
+            TaggerModel.train_model(train_sentences, dev_sentences, self.config, component_path)
 
         elif component == "parser":
             from src.models.parser import ParserModel
-            ParserModel.train_model(train_sentences, dev_sentences, self.config, model_path)
+            ParserModel.train_model(train_sentences, dev_sentences, self.config, component_path)
 
         elif component == "lemmatizer":
             from src.models.lemmatizer import LemmatizerModel
-            LemmatizerModel.train_model(train_sentences, dev_sentences, self.config, model_path)
+            LemmatizerModel.train_model(train_sentences, dev_sentences, self.config, component_path)
 
         else:
             raise ValueError(f"Unknown component: {component}")
