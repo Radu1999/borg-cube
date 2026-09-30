@@ -107,7 +107,8 @@ class TaggerModel(BorgBaseModel):
         for epoch in range(config.num_epochs):
             model.train()
             total_loss = 0.0
-            for batch in tqdm(train_loader, desc=f"[Tagger] Epoch {epoch + 1}"):
+            progress = tqdm(train_loader, desc=f"[Tagger] Epoch {epoch + 1}")
+            for batch in progress:
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
                 upos_lbl = batch["upos_labels"].to(device)
@@ -115,17 +116,24 @@ class TaggerModel(BorgBaseModel):
                 feats_lbl = batch["feats_labels"].to(device)
 
                 u_logits, x_logits, f_logits = model(input_ids, attention_mask)
-                loss = (
-                    loss_fn(u_logits.view(-1, len(upos_vocab)), upos_lbl.view(-1))
-                    + loss_fn(x_logits.view(-1, len(xpos_vocab)), xpos_lbl.view(-1))
-                    + loss_fn(f_logits.view(-1, len(feats_vocab)), feats_lbl.view(-1))
-                )
+                upos_loss = loss_fn(u_logits.view(-1, len(upos_vocab)), upos_lbl.view(-1))
+                xpos_loss = loss_fn(x_logits.view(-1, len(xpos_vocab)), xpos_lbl.view(-1))
+                feats_loss = loss_fn(f_logits.view(-1, len(feats_vocab)), feats_lbl.view(-1))
+                loss = upos_loss + xpos_loss + feats_loss
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 scheduler.step()
                 total_loss += loss.item()
+                progress.set_postfix(
+                    loss=f"{loss.item():.4f}",
+                    upos_loss=f"{upos_loss.item():.4f}",
+                    xpos_loss=f"{xpos_loss.item():.4f}",
+                    feats_loss=f"{feats_loss.item():.4f}",
+                    avg_loss=f"{total_loss / progress.n:.4f}",
+                    lr=f"{scheduler.get_last_lr()[0]:.2e}",
+                )
 
             avg_loss = total_loss / len(train_loader)
 

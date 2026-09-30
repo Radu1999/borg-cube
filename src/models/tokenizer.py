@@ -68,7 +68,8 @@ class TokenizerModel(BorgBaseModel):
         for epoch in range(config.num_epochs):
             model.train()
             total_loss = 0.0
-            for batch in tqdm(train_loader, desc=f"[Tokenizer] Epoch {epoch + 1}"):
+            progress = tqdm(train_loader, desc=f"[Tokenizer] Epoch {epoch + 1}")
+            for batch in progress:
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
                 labels = batch["labels"].to(device)
@@ -81,6 +82,11 @@ class TokenizerModel(BorgBaseModel):
                 optimizer.step()
                 scheduler.step()
                 total_loss += loss.item()
+                progress.set_postfix(
+                    loss=f"{loss.item():.4f}",
+                    avg_loss=f"{total_loss / progress.n:.4f}",
+                    lr=f"{scheduler.get_last_lr()[0]:.2e}",
+                )
 
             avg_loss = total_loss / len(train_loader)
 
