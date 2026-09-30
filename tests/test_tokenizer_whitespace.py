@@ -104,5 +104,54 @@ def test_tokenizer_uses_overlapping_windows():
     assert sentences[0].tokens[0].form == text
 
 
+def test_tokenizer_handles_subword_offsets_that_include_leading_whitespace():
+    # Some fast tokenizers (e.g. the SentencePiece-based DeBERTa-v3
+    # tokenizer) report an offset span for a sub-word that includes the
+    # whitespace preceding it, e.g. offset (1, 3) for " B" instead of (2, 3)
+    # for "B". `predict` must strip that leading whitespace out of the
+    # reconstructed token form and still detect the space correctly.
+    class FakeTokenizer:
+        def __call__(self, text, **kwargs):
+            return {
+                "input_ids": [1000, 1001],
+                "offset_mapping": [(0, 1), (1, 3)],
+            }
+
+        def num_special_tokens_to_add(self, pair=False):
+            return 2
+
+        def prepare_for_model(self, token_ids, add_special_tokens, return_attention_mask):
+            input_ids = [101, *token_ids, 102]
+            return {"input_ids": input_ids, "attention_mask": [1] * len(input_ids)}
+
+        def get_special_tokens_mask(self, token_ids, already_has_special_tokens):
+            return [1, *([0] * len(token_ids)), 1]
+
+    model = TokenizerModel.__new__(TokenizerModel)
+    torch.nn.Module.__init__(model)
+    model.config = SimpleNamespace(max_seq_length=10, resolve_device=lambda: "cpu")
+    model.encoder = SimpleNamespace(config=SimpleNamespace(max_position_embeddings=10))
+    model.hf_tokenizer = FakeTokenizer()
+
+    def mock_forward(input_ids, attention_mask):
+        logits = torch.zeros((1, input_ids.size(1), TokenizerModel.NUM_LABELS))
+        for i, token_id in enumerate(input_ids[0].tolist()):
+            if token_id == 1000:
+                logits[0, i, 2] = 1  # SENTENCE_START
+            elif token_id == 1001:
+                logits[0, i, 1] = 1  # TOKEN_START
+            else:
+                logits[0, i, 0] = 1  # CONTINUATION
+        return logits
+
+    model.forward = mock_forward
+    sents = model.predict("A B")
+
+    assert len(sents) == 1
+    tokens = sents[0].tokens
+    assert tokens[0].form == "A" and tokens[0].space_after is True
+    assert tokens[1].form == "B" and tokens[1].space_after is False
+
+
 if __name__ == "__main__":
     test_tokenizer_whitespace()

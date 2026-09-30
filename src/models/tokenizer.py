@@ -172,11 +172,19 @@ class TokenizerModel(BorgBaseModel):
                 continue  # special token
 
             label = preds[i]
-            subword = text[start:end]
+            raw_subword = text[start:end]
 
-            # Detect whitespace before this token/subword
-            # If there is text between last_end and start, it's whitespace
-            whitespace_before = text[last_end:start]
+            # Some tokenizers (e.g. SentencePiece-based ones used by
+            # DeBERTa-v3) include leading whitespace inside the offset span
+            # of a sub-word that starts a new word. Split that whitespace
+            # out so `subword` only holds the actual sub-word content.
+            subword = raw_subword.lstrip()
+            leading_ws = raw_subword[: len(raw_subword) - len(subword)]
+
+            # Detect whitespace before this token/subword: either a gap
+            # between the previous subword and this one, or whitespace
+            # embedded at the start of this subword's own offset span.
+            whitespace_before = text[last_end:start] + leading_ws
 
             if label == TokenizerDataset.SENTENCE_START:
                 # Flush any pending token from the previous sentence
