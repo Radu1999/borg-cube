@@ -7,7 +7,7 @@ setup(
     name="borg-cube",
     version="0.1.0",
     description="A complete NLP processing pipeline using DeBERTa-v3 and adapters",
-    packages=find_packages(include=["borg", "src", "src.*"]),
+    packages=find_packages(include=["borg", "src", "src.*", "eval"]),
     entry_points={
         "console_scripts": ["borg=borg.cli:main"],
     },
