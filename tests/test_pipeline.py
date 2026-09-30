@@ -348,6 +348,45 @@ class TestCubeAPI(unittest.TestCase):
         r = repr(cube)
         self.assertIn("de", r)
 
+    def test_cube_factory_loads_named_model_components(self):
+        from borg import cube
+
+        with tempfile.TemporaryDirectory() as home:
+            component_dir = os.path.join(home, ".borg_cube", "ro_rrt", "tagger")
+            os.makedirs(component_dir)
+            with patch("borg.os.path.expanduser", return_value=home):
+                with patch("borg.BorgPipeline.load_component") as load_component:
+                    api = cube("ro_rrt", components=["tagger"])
+
+        self.assertIsNotNone(api.pipeline)
+        load_component.assert_called_once_with("tagger", component_dir)
+
+    def test_cube_factory_loads_file_uri_and_empty_components(self):
+        from borg import cube
+
+        with tempfile.TemporaryDirectory() as model_path:
+            os.makedirs(os.path.join(model_path, "tokenizer"))
+            with patch("borg.BorgPipeline.load_component") as load_component:
+                api = cube("file://" + model_path, components=[])
+
+        load_component.assert_not_called()
+        self.assertEqual(api.model_path, model_path)
+
+
+class TestPipelineTrainingPaths(unittest.TestCase):
+
+    def test_train_component_saves_in_component_subfolder(self):
+        from src.pipeline.pipeline import BorgPipeline
+        tagger_module = types.ModuleType("src.models.tagger")
+        tagger_module.TaggerModel = types.SimpleNamespace(train_model=MagicMock())
+
+        with patch("src.pipeline.pipeline.read_conllu", return_value=[]):
+            with patch.dict(sys.modules, {"src.models.tagger": tagger_module}):
+                BorgPipeline().train_component("tagger", "train.conllu", "dev.conllu", "/models/ro_rrt")
+
+        train_model = tagger_module.TaggerModel.train_model
+        self.assertEqual(train_model.call_args.args[3], "/models/ro_rrt/tagger")
+
 
 # ---------------------------------------------------------------------------
 # 7. Adapter configuration
