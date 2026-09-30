@@ -14,6 +14,11 @@ from src.config import BorgConfig
 from src.data.conllu import Sentence, Token
 from src.data.dataset import TokenizerDataset
 from src.models.base import BorgBaseModel
+from src.models.evaluation import (
+    evaluate_predictions,
+    print_validation_metrics,
+    tokenizer_validation_text,
+)
 
 _LABELS = {0: "C", 1: "T", 2: "S"}  # Continuation / Token-start / Sentence-start
 
@@ -53,10 +58,8 @@ class TokenizerModel(BorgBaseModel):
 
         model = TokenizerModel(config).to(device)
         train_ds = TokenizerDataset(train_sentences, config.model_name, config.max_seq_length)
-        dev_ds = TokenizerDataset(dev_sentences, config.model_name, config.max_seq_length)
 
         train_loader = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True)
-        dev_loader = DataLoader(dev_ds, batch_size=config.eval_batch_size)
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
         total_steps = len(train_loader) * config.num_epochs
@@ -90,24 +93,13 @@ class TokenizerModel(BorgBaseModel):
 
             avg_loss = total_loss / len(train_loader)
 
-            # Validation
-            model.eval()
-            correct = total = 0
-            with torch.no_grad():
-                for batch in dev_loader:
-                    input_ids = batch["input_ids"].to(device)
-                    attention_mask = batch["attention_mask"].to(device)
-                    labels = batch["labels"].to(device)
-                    logits = model(input_ids, attention_mask)
-                    preds = logits.argmax(-1)
-                    mask = labels != -100
-                    correct += (preds[mask] == labels[mask]).sum().item()
-                    total += mask.sum().item()
-
-            acc = correct / max(total, 1)
-            print(f"  loss={avg_loss:.4f}  dev_acc={acc:.4f}")
-            if acc > best_acc:
-                best_acc = acc
+            predicted_sentences = model.predict(tokenizer_validation_text(dev_sentences))
+            metrics = evaluate_predictions(dev_sentences, predicted_sentences)
+            print(f"  loss={avg_loss:.4f}")
+            print_validation_metrics(metrics, ["Tokens", "Sentences"])
+            token_f1 = metrics["Tokens"].f1
+            if token_f1 > best_acc:
+                best_acc = token_f1
                 model.save(model_path)
 
         return model

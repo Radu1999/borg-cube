@@ -13,6 +13,7 @@ from src.config import BorgConfig
 from src.data.conllu import Sentence, Token
 from src.data.dataset import ParserDataset, _build_vocab
 from src.models.base import BorgBaseModel
+from src.models.evaluation import evaluate_predictions, print_validation_metrics
 
 
 # ---------------------------------------------------------------------------
@@ -141,11 +142,7 @@ class ParserModel(BorgBaseModel):
         train_ds = ParserDataset(
             train_sentences, config.model_name, config.max_seq_length, deprel_vocab
         )
-        dev_ds = ParserDataset(
-            dev_sentences, config.model_name, config.max_seq_length, deprel_vocab
-        )
         train_loader = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True)
-        dev_loader = DataLoader(dev_ds, batch_size=config.eval_batch_size)
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
         total_steps = len(train_loader) * config.num_epochs
@@ -154,7 +151,7 @@ class ParserModel(BorgBaseModel):
         arc_loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
         rel_loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
-        best_uas = -1.0
+        best_las = -1.0
 
         for epoch in range(config.num_epochs):
             model.train()
@@ -204,24 +201,12 @@ class ParserModel(BorgBaseModel):
 
             avg_loss = total_loss / len(train_loader)
 
-            # Validation UAS
-            model.eval()
-            correct_arc = total_arc = 0
-            with torch.no_grad():
-                for batch in dev_loader:
-                    input_ids = batch["input_ids"].to(device)
-                    attention_mask = batch["attention_mask"].to(device)
-                    head_labels = batch["head_labels"].to(device)
-                    arc_scores, _ = model(input_ids, attention_mask)
-                    preds = arc_scores.argmax(-1)
-                    mask = head_labels != -100
-                    correct_arc += (preds[mask] == head_labels[mask]).sum().item()
-                    total_arc += mask.sum().item()
-
-            uas = correct_arc / max(total_arc, 1)
-            print(f"  loss={avg_loss:.4f}  dev_UAS={uas:.4f}")
-            if uas > best_uas:
-                best_uas = uas
+            metrics = evaluate_predictions(dev_sentences, model.predict(dev_sentences))
+            print(f"  loss={avg_loss:.4f}")
+            print_validation_metrics(metrics, ["UAS", "LAS"])
+            las_f1 = metrics["LAS"].f1
+            if las_f1 > best_las:
+                best_las = las_f1
                 model.save(model_path)
 
         return model

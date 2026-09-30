@@ -13,6 +13,7 @@ from src.config import BorgConfig
 from src.data.conllu import Sentence, Token
 from src.data.dataset import LemmatizerDataset, _build_vocab, _compute_edit_script
 from src.models.base import BorgBaseModel
+from src.models.evaluation import evaluate_predictions, print_validation_metrics
 
 
 def _apply_edit_script(form: str, script: str) -> str:
@@ -104,12 +105,7 @@ class LemmatizerModel(BorgBaseModel):
             train_sentences, config.model_name, config.max_seq_length,
             upos_vocab, script_vocab,
         )
-        dev_ds = LemmatizerDataset(
-            dev_sentences, config.model_name, config.max_seq_length,
-            upos_vocab, script_vocab,
-        )
         train_loader = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True)
-        dev_loader = DataLoader(dev_ds, batch_size=config.eval_batch_size)
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
         total_steps = len(train_loader) * config.num_epochs
@@ -145,24 +141,12 @@ class LemmatizerModel(BorgBaseModel):
 
             avg_loss = total_loss / len(train_loader)
 
-            model.eval()
-            correct = total = 0
-            with torch.no_grad():
-                for batch in dev_loader:
-                    input_ids = batch["input_ids"].to(device)
-                    attention_mask = batch["attention_mask"].to(device)
-                    upos_ids = batch["upos_ids"].to(device)
-                    script_labels = batch["script_labels"].to(device)
-                    logits = model(input_ids, attention_mask, upos_ids)
-                    preds = logits.argmax(-1)
-                    mask = script_labels != -100
-                    correct += (preds[mask] == script_labels[mask]).sum().item()
-                    total += mask.sum().item()
-
-            acc = correct / max(total, 1)
-            print(f"  loss={avg_loss:.4f}  dev_script_acc={acc:.4f}")
-            if acc > best_acc:
-                best_acc = acc
+            metrics = evaluate_predictions(dev_sentences, model.predict(dev_sentences))
+            print(f"  loss={avg_loss:.4f}")
+            print_validation_metrics(metrics, ["LEMMA"])
+            lemma_f1 = metrics["LEMMA"].f1
+            if lemma_f1 > best_acc:
+                best_acc = lemma_f1
                 model.save(model_path)
 
         return model
