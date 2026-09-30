@@ -134,8 +134,16 @@ class TokenizerDataset(Dataset):
             if start == 0 and end == 0:
                 aligned_labels[i] = -100  # special token — ignored
             else:
-                # Use the label of the first character of this sub-word
+                # Use the label of the first character of this sub-word.
+                # Some tokenizers (e.g. SentencePiece-based ones used by
+                # DeBERTa-v3) include the leading whitespace in the offset
+                # span of a sub-word that starts a new word. Skip past any
+                # such leading whitespace so we don't pick up the space
+                # character's CONTINUATION label instead of the real
+                # TOKEN_START/SENTENCE_START label of the word.
                 char_idx = start
+                while char_idx < end and char_idx < len(text) and text[char_idx].isspace():
+                    char_idx += 1
                 if char_idx < len(char_labels):
                     aligned_labels[i] = char_labels[char_idx]
                 else:
