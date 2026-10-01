@@ -5,6 +5,7 @@ import unittest
 
 from src.data.conllu import Sentence, Token
 from src.models.evaluation import (
+    average_f1,
     evaluate_predictions,
     print_validation_metrics,
     tokenizer_validation_text,
@@ -52,6 +53,14 @@ class TestTrainingEvaluation(unittest.TestCase):
 
         self.assertIn("UPOS", output.getvalue())
         self.assertNotIn("XPOS", output.getvalue())
+
+    def test_average_f1_uses_all_requested_metrics(self):
+        sentence = Sentence(tokens=[Token(id=1, form="word", upos="NOUN")])
+        metrics = evaluate_predictions([sentence], [sentence])
+        metrics["UPOS"].f1 = 0.4
+        metrics["XPOS"].f1 = 0.8
+
+        self.assertAlmostEqual(average_f1(metrics, ["UPOS", "XPOS"]), 0.6)
 
 
 if __name__ == "__main__":

@@ -74,7 +74,10 @@ def cmd_train(args: argparse.Namespace) -> None:
     config = _make_config(args)
     pipeline = BorgPipeline(config)
     pipeline.train_component(args.component, args.train_file, args.dev_file, args.model_file)
-    print(f"Saved {args.component} model to {args.model_file}/{args.component}")
+    print(
+        f"Saved {args.component} last and best models to "
+        f"{args.model_file}/{args.component}/{{last,best}}"
+    )
 
 
 def cmd_test(args: argparse.Namespace) -> None:

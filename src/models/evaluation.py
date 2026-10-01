@@ -45,3 +45,8 @@ def print_validation_metrics(
             f"  {name:<12} {result.precision:>10.2%} {result.recall:>10.2%}"
             f" {result.f1:>10.2%} {result.gold_count:>8} {result.system_count:>8}"
         )
+
+
+def average_f1(metrics: Dict[str, EvalResult], metric_names: Sequence[str]) -> float:
+    """Return the mean F1 score across the requested validation metrics."""
+    return sum(metrics[name].f1 for name in metric_names) / len(metric_names)

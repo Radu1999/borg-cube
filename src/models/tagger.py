@@ -14,7 +14,8 @@ from src.config import BorgConfig
 from src.data.conllu import Sentence, Token
 from src.data.dataset import TaggerDataset, _build_vocab, _feats_to_str
 from src.models.base import BorgBaseModel
-from src.models.evaluation import evaluate_predictions, print_validation_metrics
+from src.models.evaluation import average_f1, evaluate_predictions, print_validation_metrics
+from src.models.checkpoints import save_training_models
 
 
 class TaggerModel(BorgBaseModel):
@@ -98,7 +99,7 @@ class TaggerModel(BorgBaseModel):
         loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
         inv_upos = {v: k for k, v in upos_vocab.items()}
-        best_acc = -1.0
+        best_score = -1.0
 
         for epoch in range(config.num_epochs):
             model.train()
@@ -136,10 +137,8 @@ class TaggerModel(BorgBaseModel):
             metrics = evaluate_predictions(dev_sentences, model.predict(dev_sentences))
             print(f"  loss={avg_loss:.4f}")
             print_validation_metrics(metrics, ["UPOS", "XPOS", "FEATS"])
-            upos_f1 = metrics["UPOS"].f1
-            if upos_f1 > best_acc:
-                best_acc = upos_f1
-                model.save(model_path)
+            score = average_f1(metrics, ["UPOS", "XPOS", "FEATS"])
+            best_score = save_training_models(model, model_path, score, best_score)
 
         return model
 
