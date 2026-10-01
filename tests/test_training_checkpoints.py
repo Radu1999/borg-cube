@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 
-from src.models.base import save_training_models
+from src.models.checkpoints import save_training_models
 
 
 class _FakeModel:
@@ -31,6 +31,7 @@ class TestTrainingCheckpoints(unittest.TestCase):
 
     def test_updates_best_when_mean_score_improves(self):
         model = _FakeModel()
+        model.score = 0.5
         with tempfile.TemporaryDirectory() as path:
             best_score = save_training_models(model, path, 0.5, 0.4)
 

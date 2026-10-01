@@ -12,8 +12,9 @@ from transformers import get_linear_schedule_with_warmup
 from src.config import BorgConfig
 from src.data.conllu import Sentence, Token
 from src.data.dataset import LemmatizerDataset, _build_vocab, _compute_edit_script
-from src.models.base import BorgBaseModel, save_training_models
+from src.models.base import BorgBaseModel
 from src.models.evaluation import average_f1, evaluate_predictions, print_validation_metrics
+from src.models.checkpoints import save_training_models
 
 
 def _apply_edit_script(form: str, script: str) -> str:
