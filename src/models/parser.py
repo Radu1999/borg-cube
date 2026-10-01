@@ -100,7 +100,9 @@ def greedy_decode(scores: torch.Tensor, word_positions: Dict[int, int]) -> Dict[
         dep_i, head_i = divmod(idx, num_heads)
         candidates.append((flat_scores[idx], positions[dep_i], nodes[head_i]))
 
-    # Group by dependent (score-descending) for the fallback pass below.
+    # Group by dependent (score-descending) for a uniform, single-pass
+    # head-selection routine (used both for the initial greedy pass and
+    # the fallback below).
     by_dep: Dict[int, list] = {}
     for score, dep, head in candidates:
         by_dep.setdefault(dep, []).append((score, head))
@@ -118,8 +120,20 @@ def greedy_decode(scores: torch.Tensor, word_positions: Dict[int, int]) -> Dict[
         if ra != rb:
             parent[ra] = rb
 
-    assigned: Dict[int, int] = {}
     root_used = False
+
+    def pick_head(dep: int, relax_root_cap: bool, relax_cycle_check: bool) -> Optional[int]:
+        """Pick the best-scoring head for *dep* satisfying the active
+        constraints, or ``None`` if no candidate qualifies."""
+        for _, head in by_dep.get(dep, []):
+            if not relax_root_cap and head == ROOT and root_used:
+                continue
+            if not relax_cycle_check and find(dep) == find(head):
+                continue
+            return head
+        return None
+
+    assigned: Dict[int, int] = {}
     for score, dep, head in candidates:
         if dep in assigned:
             continue
@@ -137,23 +151,19 @@ def greedy_decode(scores: torch.Tensor, word_positions: Dict[int, int]) -> Dict[
     # remaining candidate). Preference order: (1) cycle-free head that
     # also respects the single-root cap, (2) cycle-free head ignoring the
     # single-root cap, (3) best-scoring head regardless of cycles, and
-    # finally (4) ROOT to guarantee every word gets a head.
+    # finally (4) ROOT to guarantee every word gets a head. Note: ROOT is
+    # 0, so candidates must be compared against ``None`` explicitly rather
+    # than relying on truthiness.
     for dep in positions:
         if dep in assigned:
             continue
-        head_candidates = by_dep.get(dep, [])
-        chosen = None
-        for _, head in head_candidates:
-            if find(dep) != find(head) and not (head == ROOT and root_used):
-                chosen = head
-                break
+        chosen = pick_head(dep, relax_root_cap=False, relax_cycle_check=False)
         if chosen is None:
-            for _, head in head_candidates:
-                if find(dep) != find(head):
-                    chosen = head
-                    break
+            chosen = pick_head(dep, relax_root_cap=True, relax_cycle_check=False)
         if chosen is None:
-            chosen = head_candidates[0][1] if head_candidates else ROOT
+            chosen = pick_head(dep, relax_root_cap=True, relax_cycle_check=True)
+        if chosen is None:
+            chosen = ROOT
         assigned[dep] = chosen
         union(dep, chosen)
         if chosen == ROOT:

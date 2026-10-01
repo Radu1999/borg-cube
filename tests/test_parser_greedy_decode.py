@@ -80,6 +80,31 @@ class TestGreedyDecode(unittest.TestCase):
                 visited.add(cur)
                 cur = next(w for w, pos in word_positions.items() if pos == heads[cur])
 
+    def test_fallback_does_not_introduce_a_cycle(self):
+        # word0 ("A") takes ROOT first (highest score). word1 ("B") and
+        # word2 ("C") mutually prefer each other, so whichever is processed
+        # second in the main pass would close a 2-cycle and must fall back
+        # to a different, cycle-free head instead.
+        word_positions = {0: 1, 1: 2, 2: 3}
+        scores = torch.full((4, 4), -100.0)
+        scores[1, 0] = 100.0  # A -> ROOT (best overall, assigned first)
+        scores[2, 3] = 90.0   # B -> C
+        scores[3, 2] = 80.0   # C -> B (would close a 2-cycle with B)
+
+        heads = greedy_decode(scores, word_positions)
+
+        self.assertEqual(heads[0], 0)  # A -> ROOT
+        self.assertEqual(heads[1], 3)  # B -> C
+        self.assertNotEqual(heads[2], 2)  # C must NOT point back to B
+        # No cycles: following head pointers from any word must reach ROOT.
+        for wid in heads:
+            visited = set()
+            cur = wid
+            while heads[cur] != 0:
+                self.assertNotIn(cur, visited, "cycle detected")
+                visited.add(cur)
+                cur = next(w for w, pos in word_positions.items() if pos == heads[cur])
+
     def test_every_word_gets_a_head(self):
         word_positions = {0: 1, 1: 2, 2: 3, 3: 4}
         torch.manual_seed(0)
