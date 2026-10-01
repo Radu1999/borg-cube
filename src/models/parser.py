@@ -86,8 +86,8 @@ def greedy_decode(scores: torch.Tensor, word_positions: Dict[int, int]) -> Dict[
     # Complexity is O(D*H) ~ O(L^2) in the number of words per sentence,
     # which is negligible for typical sentence lengths; this mirrors how
     # much work a full Chu-Liu-Edmonds decoder would do anyway.
-    positions_t = torch.tensor(positions, dtype=torch.long)
-    nodes_t = torch.tensor(nodes, dtype=torch.long)
+    positions_t = torch.tensor(positions, dtype=torch.long, device=scores.device)
+    nodes_t = torch.tensor(nodes, dtype=torch.long, device=scores.device)
     sub_scores = scores[positions_t][:, nodes_t]  # (D, H)
     self_loop_mask = positions_t.unsqueeze(1) == nodes_t.unsqueeze(0)  # (D, H)
     sub_scores = sub_scores.masked_fill(self_loop_mask, float("-inf"))

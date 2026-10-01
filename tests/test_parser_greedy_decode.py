@@ -114,6 +114,18 @@ class TestGreedyDecode(unittest.TestCase):
 
         self.assertEqual(set(heads.keys()), set(word_positions.keys()))
 
+    @unittest.skipUnless(torch.cuda.is_available(), "requires a CUDA device")
+    def test_works_with_scores_on_cuda_device(self):
+        # Regression test: internal index tensors must be created on the
+        # same device as `scores`, otherwise `masked_fill` raises
+        # "expected self and mask to be on the same device".
+        word_positions = {0: 1, 1: 2, 2: 3}
+        scores = torch.randn(4, 4, device="cuda")
+
+        heads = greedy_decode(scores, word_positions)
+
+        self.assertEqual(set(heads.keys()), set(word_positions.keys()))
+
 
 if __name__ == "__main__":
     unittest.main()
