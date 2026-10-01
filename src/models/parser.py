@@ -150,9 +150,12 @@ def greedy_decode(scores: torch.Tensor, word_positions: Dict[int, int]) -> Dict[
     # cycle-avoidance and the single-root constraint rule out every
     # remaining candidate). Preference order: (1) cycle-free head that
     # also respects the single-root cap, (2) cycle-free head ignoring the
-    # single-root cap, (3) best-scoring head regardless of cycles, and
-    # finally (4) ROOT to guarantee every word gets a head. Note: ROOT is
-    # 0, so candidates must be compared against ``None`` explicitly rather
+    # single-root cap, (3) best-scoring head regardless of cycles. Stage
+    # (3) fully relaxes both constraints, so it always returns a candidate
+    # (every dependent has at least the ROOT edge in `by_dep`) — the final
+    # ``ROOT`` default only guards against a degenerate/empty candidate
+    # list and is not expected to be reached in practice. Note: ROOT is 0,
+    # so candidates must be compared against ``None`` explicitly rather
     # than relying on truthiness.
     for dep in positions:
         if dep in assigned:
