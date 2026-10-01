@@ -12,8 +12,8 @@ from transformers import get_linear_schedule_with_warmup
 from src.config import BorgConfig
 from src.data.conllu import Sentence, Token
 from src.data.dataset import LemmatizerDataset, _build_vocab, _compute_edit_script
-from src.models.base import BorgBaseModel
-from src.models.evaluation import evaluate_predictions, print_validation_metrics
+from src.models.base import BorgBaseModel, save_training_models
+from src.models.evaluation import average_f1, evaluate_predictions, print_validation_metrics
 
 
 def _apply_edit_script(form: str, script: str) -> str:
@@ -113,7 +113,7 @@ class LemmatizerModel(BorgBaseModel):
         scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, total_steps)
         loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
-        best_acc = -1.0
+        best_score = -1.0
 
         for epoch in range(config.num_epochs):
             model.train()
@@ -144,10 +144,8 @@ class LemmatizerModel(BorgBaseModel):
             metrics = evaluate_predictions(dev_sentences, model.predict(dev_sentences))
             print(f"  loss={avg_loss:.4f}")
             print_validation_metrics(metrics, ["LEMMA"])
-            lemma_f1 = metrics["LEMMA"].f1
-            if lemma_f1 > best_acc:
-                best_acc = lemma_f1
-                model.save(model_path)
+            score = average_f1(metrics, ["LEMMA"])
+            best_score = save_training_models(model, model_path, score, best_score)
 
         return model
 

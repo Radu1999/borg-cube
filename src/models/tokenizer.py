@@ -13,8 +13,9 @@ from transformers import get_linear_schedule_with_warmup
 from src.config import BorgConfig
 from src.data.conllu import Sentence, Token
 from src.data.dataset import TokenizerDataset
-from src.models.base import BorgBaseModel
+from src.models.base import BorgBaseModel, save_training_models
 from src.models.evaluation import (
+    average_f1,
     evaluate_predictions,
     print_validation_metrics,
     tokenizer_validation_text,
@@ -67,7 +68,7 @@ class TokenizerModel(BorgBaseModel):
         scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, total_steps)
         loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
-        best_acc = -1.0
+        best_score = -1.0
         for epoch in range(config.num_epochs):
             model.train()
             total_loss = 0.0
@@ -97,10 +98,8 @@ class TokenizerModel(BorgBaseModel):
             metrics = evaluate_predictions(dev_sentences, predicted_sentences)
             print(f"  loss={avg_loss:.4f}")
             print_validation_metrics(metrics, ["Tokens", "Sentences"])
-            token_f1 = metrics["Tokens"].f1
-            if token_f1 > best_acc:
-                best_acc = token_f1
-                model.save(model_path)
+            score = average_f1(metrics, ["Tokens", "Sentences"])
+            best_score = save_training_models(model, model_path, score, best_score)
 
         return model
 

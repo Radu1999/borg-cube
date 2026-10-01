@@ -12,8 +12,8 @@ from transformers import get_linear_schedule_with_warmup
 from src.config import BorgConfig
 from src.data.conllu import Sentence, Token
 from src.data.dataset import ParserDataset, _build_vocab
-from src.models.base import BorgBaseModel
-from src.models.evaluation import evaluate_predictions, print_validation_metrics
+from src.models.base import BorgBaseModel, save_training_models
+from src.models.evaluation import average_f1, evaluate_predictions, print_validation_metrics
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +151,7 @@ class ParserModel(BorgBaseModel):
         arc_loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
         rel_loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
-        best_las = -1.0
+        best_score = -1.0
 
         for epoch in range(config.num_epochs):
             model.train()
@@ -204,10 +204,8 @@ class ParserModel(BorgBaseModel):
             metrics = evaluate_predictions(dev_sentences, model.predict(dev_sentences))
             print(f"  loss={avg_loss:.4f}")
             print_validation_metrics(metrics, ["UAS", "LAS"])
-            las_f1 = metrics["LAS"].f1
-            if las_f1 > best_las:
-                best_las = las_f1
-                model.save(model_path)
+            score = average_f1(metrics, ["UAS", "LAS"])
+            best_score = save_training_models(model, model_path, score, best_score)
 
         return model
 

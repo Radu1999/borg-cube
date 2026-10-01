@@ -95,3 +95,14 @@ class BorgBaseModel(nn.Module):
 
     def _set_extras(self, extras: Dict[str, Any]) -> None:
         pass
+
+
+def save_training_models(
+    model: BorgBaseModel, path: str, score: float, best_score: float
+) -> float:
+    """Save the latest model and update the best model when its score improves."""
+    model.save(os.path.join(path, "last"))
+    if score > best_score:
+        model.save(os.path.join(path, "best"))
+        return score
+    return best_score
