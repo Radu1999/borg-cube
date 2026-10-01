@@ -55,6 +55,152 @@ class BiaffineAttention(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Greedy arc decoding
+# ---------------------------------------------------------------------------
+
+def greedy_decode(scores: torch.Tensor, word_positions: Dict[int, int]) -> Dict[int, int]:
+    """Decode a dependency tree greedily from raw arc scores.
+
+    Rather than running Chu-Liu-Edmonds, this sorts every candidate
+    (dependent, head) arc by score (descending) and walks through them,
+    only keeping an arc if the dependent doesn't already have a head and
+    adding it wouldn't close a cycle. This is a simple, fast approximation
+    of maximum spanning arborescence decoding.
+
+    Args:
+        scores: (L, L) raw arc scores for the full sub-word sequence, where
+            scores[dep, head] is the score of attaching sub-word position
+            ``dep`` to sub-word position ``head``. Position 0 (the CLS
+            token) represents the virtual ROOT node.
+        word_positions: mapping of word-id -> first sub-word position.
+
+    Returns:
+        Mapping of word-id -> head position (0 means ROOT).
+    """
+    ROOT = 0
+    positions = list(word_positions.values())
+    nodes = [ROOT] + positions
+
+    # Vectorized score extraction: build the (dep x head) sub-matrix once
+    # instead of calling `.item()` for every pair in a Python double loop.
+    # Complexity is O(D*H) ~ O(L^2) in the number of words per sentence,
+    # which is negligible for typical sentence lengths; this mirrors how
+    # much work a full Chu-Liu-Edmonds decoder would do anyway.
+    positions_t = torch.tensor(positions, dtype=torch.long)
+    nodes_t = torch.tensor(nodes, dtype=torch.long)
+    sub_scores = scores[positions_t][:, nodes_t]  # (D, H)
+    self_loop_mask = positions_t.unsqueeze(1) == nodes_t.unsqueeze(0)  # (D, H)
+    sub_scores = sub_scores.masked_fill(self_loop_mask, float("-inf"))
+
+    flat_order = torch.argsort(sub_scores.reshape(-1), descending=True).tolist()
+    num_heads = len(nodes)
+    flat_scores = sub_scores.reshape(-1).tolist()
+    flat_self_loop = self_loop_mask.reshape(-1).tolist()
+    candidates = []
+    for idx in flat_order:
+        if flat_self_loop[idx]:
+            continue  # skip masked self-loop entries, wherever they sort to
+        dep_i, head_i = divmod(idx, num_heads)
+        candidates.append((flat_scores[idx], positions[dep_i], nodes[head_i]))
+
+    # Group by dependent (score-descending) for a uniform, single-pass
+    # head-selection routine (used both for the initial greedy pass and
+    # the fallback below).
+    by_dep: Dict[int, list] = {}
+    for score, dep, head in candidates:
+        by_dep.setdefault(dep, []).append((score, head))
+
+    parent = {n: n for n in nodes}
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    root_used = False
+
+    def is_allowed(dep: int, head: int, relax_root_cap: bool, relax_cycle_check: bool) -> bool:
+        """Shared constraint check used by both the main greedy pass and
+        the fallback `pick_head` below, so the root-cap/cycle rules can't
+        drift out of sync between the two call sites."""
+        if not relax_root_cap and head == ROOT and root_used:
+            return False
+        if not relax_cycle_check and find(dep) == find(head):
+            return False
+        return True
+
+    def pick_head(dep: int, relax_root_cap: bool, relax_cycle_check: bool) -> Optional[int]:
+        """Pick the best-scoring head for *dep* satisfying the active
+        constraints, or ``None`` if no candidate qualifies."""
+        for _, head in by_dep.get(dep, []):
+            if is_allowed(dep, head, relax_root_cap, relax_cycle_check):
+                return head
+        return None
+
+    assigned: Dict[int, int] = {}
+    # Note: this main pass intentionally does *not* call `pick_head` — it
+    # walks the single globally-sorted `candidates` list so that arcs are
+    # considered strictly in overall score order across all dependents
+    # (the core of the greedy algorithm), whereas `pick_head` scans only
+    # one dependent's own candidates and is used solely by the fallback
+    # pass below. Both share the same `is_allowed` constraint check
+    # (root cap + cycle), so they can't drift out of sync.
+    for score, dep, head in candidates:
+        if dep in assigned:
+            continue
+        if not is_allowed(dep, head, relax_root_cap=False, relax_cycle_check=False):
+            continue
+        assigned[dep] = head
+        union(dep, head)
+        if head == ROOT:
+            root_used = True
+
+    # Fallback for any dependent that never got a head (can happen once
+    # cycle-avoidance and the single-root constraint rule out every
+    # remaining candidate). Preference order: (1) cycle-free head that
+    # also respects the single-root cap, (2) cycle-free head ignoring the
+    # single-root cap, (3) best-scoring head regardless of cycles. Stage
+    # (3) fully relaxes both constraints, so it is guaranteed to return a
+    # candidate (every dependent has at least the ROOT edge in `by_dep`);
+    # the assertion below makes that invariant explicit so a violation is
+    # caught immediately instead of silently producing a malformed tree.
+    # Note: ROOT is 0, so candidates must be compared against ``None``
+    # explicitly rather than relying on truthiness.
+    for dep in positions:
+        if dep in assigned:
+            continue
+        chosen = pick_head(dep, relax_root_cap=False, relax_cycle_check=False)
+        if chosen is None:
+            chosen = pick_head(dep, relax_root_cap=True, relax_cycle_check=False)
+        if chosen is None:
+            chosen = pick_head(dep, relax_root_cap=True, relax_cycle_check=True)
+        assert chosen is not None, (
+            f"pick_head returned None for dependent {dep} even with both "
+            "constraints fully relaxed; every dependent should have at "
+            "least a ROOT candidate in `by_dep`"
+        )
+        assigned[dep] = chosen
+        # Only merge components when the chosen arc doesn't already close
+        # a cycle (relevant when it was picked under `relax_cycle_check`):
+        # `find(dep) == find(chosen)` means they're already in the same
+        # component, so skipping the merge here avoids ever reassigning a
+        # root's parent pointer based on an arc that doesn't actually
+        # connect two distinct trees.
+        if find(dep) != find(chosen):
+            union(dep, chosen)
+        if chosen == ROOT:
+            root_used = True
+
+    return {wid: assigned[pos] for wid, pos in word_positions.items()}
+
+
+# ---------------------------------------------------------------------------
 # Parser model
 # ---------------------------------------------------------------------------
 
@@ -241,7 +387,7 @@ class ParserModel(BorgBaseModel):
             with torch.no_grad():
                 arc_scores, rel_scores = self(input_ids, attention_mask)
 
-            arc_preds = arc_scores.squeeze(0).argmax(-1).cpu().tolist()  # (L,)
+            arc_scores_sq = arc_scores.squeeze(0)  # (L, L)
             rel_scores_sq = rel_scores.squeeze(0)  # (L, L, n_rels)
 
             # Map sub-word positions back to word positions
@@ -252,13 +398,28 @@ class ParserModel(BorgBaseModel):
 
             inv_word_positions = {pos: wid for wid, pos in word_positions.items()}
 
+            # Greedy decoding guarantees a (near) well-formed tree, unlike
+            # naive per-token argmax which can produce cycles.
+            head_positions = greedy_decode(arc_scores_sq, word_positions)
+
             word_heads: Dict[int, int] = {}
             word_deprels: Dict[int, str] = {}
             for wid, pos in word_positions.items():
-                pred_head_pos = arc_preds[pos]
-                # Convert subword position to word index
-                pred_head_wid = inv_word_positions.get(pred_head_pos, 0)
-                word_heads[wid] = pred_head_wid + 1  # 1-based
+                pred_head_pos = head_positions[wid]
+                # Position 0 (CLS) is the virtual ROOT -> CoNLL-U head 0.
+                if pred_head_pos == 0:
+                    word_heads[wid] = 0
+                else:
+                    # `greedy_decode` is guaranteed to only return ROOT (0)
+                    # or one of the positions in `word_positions`, so this
+                    # lookup should always succeed; a `None` here would
+                    # indicate a decoder bug rather than expected input.
+                    pred_head_wid = inv_word_positions.get(pred_head_pos)
+                    assert pred_head_wid is not None, (
+                        f"greedy_decode returned an unknown head position "
+                        f"{pred_head_pos} for word {wid}"
+                    )
+                    word_heads[wid] = pred_head_wid + 1
                 # Get relation
                 rel_logits = rel_scores_sq[pos, pred_head_pos]  # (n_rels,)
                 rel_id = rel_logits.argmax(-1).item()
