@@ -55,6 +55,96 @@ class BiaffineAttention(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Greedy arc decoding
+# ---------------------------------------------------------------------------
+
+def greedy_decode(scores: torch.Tensor, word_positions: Dict[int, int]) -> Dict[int, int]:
+    """Decode a dependency tree greedily from raw arc scores.
+
+    Rather than running Chu-Liu-Edmonds, this sorts every candidate
+    (dependent, head) arc by score (descending) and walks through them,
+    only keeping an arc if the dependent doesn't already have a head and
+    adding it wouldn't close a cycle. This is a simple, fast approximation
+    of maximum spanning arborescence decoding.
+
+    Args:
+        scores: (L, L) raw arc scores for the full sub-word sequence, where
+            scores[dep, head] is the score of attaching sub-word position
+            ``dep`` to sub-word position ``head``. Position 0 (the CLS
+            token) represents the virtual ROOT node.
+        word_positions: mapping of word-id -> first sub-word position.
+
+    Returns:
+        Mapping of word-id -> head position (0 means ROOT).
+    """
+    ROOT = 0
+    positions = list(word_positions.values())
+    nodes = [ROOT] + positions
+
+    candidates = []
+    for dep in positions:
+        for head in nodes:
+            if dep == head:
+                continue
+            candidates.append((scores[dep, head].item(), dep, head))
+    candidates.sort(key=lambda x: x[0], reverse=True)
+
+    # Group by dependent (score-descending) for the fallback pass below.
+    by_dep: Dict[int, list] = {}
+    for score, dep, head in candidates:
+        by_dep.setdefault(dep, []).append((score, head))
+
+    parent = {n: n for n in nodes}
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    assigned: Dict[int, int] = {}
+    root_used = False
+    for score, dep, head in candidates:
+        if dep in assigned:
+            continue
+        if head == ROOT and root_used:
+            continue
+        if find(dep) == find(head):
+            continue
+        assigned[dep] = head
+        union(dep, head)
+        if head == ROOT:
+            root_used = True
+
+    # Fallback for any dependent that never got a head (can happen once
+    # cycle-avoidance and the single-root constraint rule out every
+    # remaining candidate). Prefer the best-scoring head that still keeps
+    # the tree cycle-free (ignoring the single-root cap); only as an
+    # absolute last resort accept a head that would close a cycle.
+    for dep in positions:
+        if dep in assigned:
+            continue
+        head_candidates = by_dep.get(dep, [])
+        chosen = None
+        for _, head in head_candidates:
+            if find(dep) != find(head):
+                chosen = head
+                break
+        if chosen is None and head_candidates:
+            chosen = head_candidates[0][1]
+        if chosen is not None:
+            assigned[dep] = chosen
+            union(dep, chosen)
+
+    return {wid: assigned[pos] for wid, pos in word_positions.items()}
+
+
+# ---------------------------------------------------------------------------
 # Parser model
 # ---------------------------------------------------------------------------
 
@@ -241,7 +331,7 @@ class ParserModel(BorgBaseModel):
             with torch.no_grad():
                 arc_scores, rel_scores = self(input_ids, attention_mask)
 
-            arc_preds = arc_scores.squeeze(0).argmax(-1).cpu().tolist()  # (L,)
+            arc_scores_sq = arc_scores.squeeze(0)  # (L, L)
             rel_scores_sq = rel_scores.squeeze(0)  # (L, L, n_rels)
 
             # Map sub-word positions back to word positions
@@ -252,13 +342,20 @@ class ParserModel(BorgBaseModel):
 
             inv_word_positions = {pos: wid for wid, pos in word_positions.items()}
 
+            # Greedy decoding guarantees a (near) well-formed tree, unlike
+            # naive per-token argmax which can produce cycles.
+            head_positions = greedy_decode(arc_scores_sq, word_positions)
+
             word_heads: Dict[int, int] = {}
             word_deprels: Dict[int, str] = {}
             for wid, pos in word_positions.items():
-                pred_head_pos = arc_preds[pos]
-                # Convert subword position to word index
-                pred_head_wid = inv_word_positions.get(pred_head_pos, 0)
-                word_heads[wid] = pred_head_wid + 1  # 1-based
+                pred_head_pos = head_positions[wid]
+                # Position 0 (CLS) is the virtual ROOT -> CoNLL-U head 0.
+                if pred_head_pos == 0:
+                    word_heads[wid] = 0
+                else:
+                    pred_head_wid = inv_word_positions.get(pred_head_pos)
+                    word_heads[wid] = 0 if pred_head_wid is None else pred_head_wid + 1
                 # Get relation
                 rel_logits = rel_scores_sq[pos, pred_head_pos]  # (n_rels,)
                 rel_id = rel_logits.argmax(-1).item()

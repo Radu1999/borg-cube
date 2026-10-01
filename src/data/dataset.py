@@ -277,6 +277,18 @@ class ParserDataset(Dataset):
         head_labels = torch.full((seq_len,), -100, dtype=torch.long)
         deprel_labels = torch.full((seq_len,), -100, dtype=torch.long)
 
+        # Map word-id -> first sub-word position. The arc classifier scores
+        # pairs of *sequence positions* (not word indices), and position 0
+        # (the CLS token) stands in for the virtual ROOT node. Gold
+        # ``tok.head`` values are 1-based CoNLL-U word indices (0 == ROOT),
+        # so they must be translated into sequence positions before being
+        # used as classification targets — otherwise the labels are
+        # meaningless whenever any word is split into multiple sub-words.
+        word_positions: Dict[int, int] = {}
+        for i, word_id in enumerate(word_ids):
+            if word_id is not None and word_id not in word_positions:
+                word_positions[word_id] = i
+
         seen_words = set()
         for i, word_id in enumerate(word_ids):
             if word_id is None or word_id in seen_words:
@@ -284,10 +296,20 @@ class ParserDataset(Dataset):
             seen_words.add(word_id)
             if word_id < len(tokens):
                 tok = tokens[word_id]
-                head_labels[i] = tok.head if tok.head is not None else 0
-                deprel_labels[i] = self.deprel_vocab.get(
-                    tok.deprel, self.deprel_vocab["<UNK>"]
-                )
+                head = tok.head if tok.head is not None else 0
+                if head == 0:
+                    head_pos = 0  # ROOT -> CLS position
+                else:
+                    # The head word may have been truncated out of the
+                    # sequence (max_length); in that case there's no valid
+                    # target position, so leave the label ignored (-100)
+                    # instead of silently mislabeling it as ROOT.
+                    head_pos = word_positions.get(head - 1)
+                if head_pos is not None:
+                    head_labels[i] = head_pos
+                    deprel_labels[i] = self.deprel_vocab.get(
+                        tok.deprel, self.deprel_vocab["<UNK>"]
+                    )
 
         return {
             "input_ids": input_ids,
