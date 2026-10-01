@@ -407,8 +407,16 @@ class ParserModel(BorgBaseModel):
                 if pred_head_pos == 0:
                     word_heads[wid] = 0
                 else:
+                    # `greedy_decode` is guaranteed to only return ROOT (0)
+                    # or one of the positions in `word_positions`, so this
+                    # lookup should always succeed; a `None` here would
+                    # indicate a decoder bug rather than expected input.
                     pred_head_wid = inv_word_positions.get(pred_head_pos)
-                    word_heads[wid] = 0 if pred_head_wid is None else pred_head_wid + 1
+                    assert pred_head_wid is not None, (
+                        f"greedy_decode returned an unknown head position "
+                        f"{pred_head_pos} for word {wid}"
+                    )
+                    word_heads[wid] = pred_head_wid + 1
                 # Get relation
                 rel_logits = rel_scores_sq[pos, pred_head_pos]  # (n_rels,)
                 rel_id = rel_logits.argmax(-1).item()
