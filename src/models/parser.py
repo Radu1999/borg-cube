@@ -92,10 +92,11 @@ def greedy_decode(scores: torch.Tensor, word_positions: Dict[int, int]) -> Dict[
     flat_order = torch.argsort(sub_scores.reshape(-1), descending=True).tolist()
     num_heads = len(nodes)
     flat_scores = sub_scores.reshape(-1).tolist()
+    flat_self_loop = self_loop_mask.reshape(-1).tolist()
     candidates = []
     for idx in flat_order:
-        if flat_scores[idx] == float("-inf"):
-            break  # remaining entries are all masked self-loops
+        if flat_self_loop[idx]:
+            continue  # skip masked self-loop entries, wherever they sort to
         dep_i, head_i = divmod(idx, num_heads)
         candidates.append((flat_scores[idx], positions[dep_i], nodes[head_i]))
 
@@ -133,23 +134,30 @@ def greedy_decode(scores: torch.Tensor, word_positions: Dict[int, int]) -> Dict[
 
     # Fallback for any dependent that never got a head (can happen once
     # cycle-avoidance and the single-root constraint rule out every
-    # remaining candidate). Prefer the best-scoring head that still keeps
-    # the tree cycle-free (ignoring the single-root cap); only as an
-    # absolute last resort accept a head that would close a cycle, and
-    # finally default to ROOT to guarantee every word gets a head.
+    # remaining candidate). Preference order: (1) cycle-free head that
+    # also respects the single-root cap, (2) cycle-free head ignoring the
+    # single-root cap, (3) best-scoring head regardless of cycles, and
+    # finally (4) ROOT to guarantee every word gets a head.
     for dep in positions:
         if dep in assigned:
             continue
         head_candidates = by_dep.get(dep, [])
         chosen = None
         for _, head in head_candidates:
-            if find(dep) != find(head):
+            if find(dep) != find(head) and not (head == ROOT and root_used):
                 chosen = head
                 break
+        if chosen is None:
+            for _, head in head_candidates:
+                if find(dep) != find(head):
+                    chosen = head
+                    break
         if chosen is None:
             chosen = head_candidates[0][1] if head_candidates else ROOT
         assigned[dep] = chosen
         union(dep, chosen)
+        if chosen == ROOT:
+            root_used = True
 
     return {wid: assigned[pos] for wid, pos in word_positions.items()}
 
