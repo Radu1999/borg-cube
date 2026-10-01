@@ -83,6 +83,9 @@ def greedy_decode(scores: torch.Tensor, word_positions: Dict[int, int]) -> Dict[
 
     # Vectorized score extraction: build the (dep x head) sub-matrix once
     # instead of calling `.item()` for every pair in a Python double loop.
+    # Complexity is O(D*H) ~ O(L^2) in the number of words per sentence,
+    # which is negligible for typical sentence lengths; this mirrors how
+    # much work a full Chu-Liu-Edmonds decoder would do anyway.
     positions_t = torch.tensor(positions, dtype=torch.long)
     nodes_t = torch.tensor(nodes, dtype=torch.long)
     sub_scores = scores[positions_t][:, nodes_t]  # (D, H)
@@ -134,6 +137,12 @@ def greedy_decode(scores: torch.Tensor, word_positions: Dict[int, int]) -> Dict[
         return None
 
     assigned: Dict[int, int] = {}
+    # Note: this main pass intentionally does *not* call `pick_head` — it
+    # walks the single globally-sorted `candidates` list so that arcs are
+    # considered strictly in overall score order across all dependents
+    # (the core of the greedy algorithm), whereas `pick_head` scans only
+    # one dependent's own candidates and is used solely by the fallback
+    # pass below. The constraint checks (root cap + cycle) are the same.
     for score, dep, head in candidates:
         if dep in assigned:
             continue

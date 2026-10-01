@@ -301,6 +301,12 @@ class ParserDataset(Dataset):
                 if head == 0:
                     head_pos = 0  # ROOT -> CLS position
                 else:
+                    # `head` is the gold token's 1-based CoNLL-U index into
+                    # `tokens` (`regular_tokens()`), and `word_id` (from
+                    # `encoding.word_ids()`, single-example call) is the
+                    # matching 0-based index into that same `forms`/`tokens`
+                    # list passed to `is_split_into_words=True` — so
+                    # `head - 1` is exactly the `word_id` of the head token.
                     # The head word may have been truncated out of the
                     # sequence (max_length); in that case there's no valid
                     # target position, so leave the label ignored (-100)
