@@ -297,6 +297,7 @@ class ParserDataset(Dataset):
             if word_id < len(tokens):
                 tok = tokens[word_id]
                 head = tok.head if tok.head is not None else 0
+                head_pos: Optional[int] = None
                 if head == 0:
                     head_pos = 0  # ROOT -> CLS position
                 else:

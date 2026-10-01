@@ -81,13 +81,23 @@ def greedy_decode(scores: torch.Tensor, word_positions: Dict[int, int]) -> Dict[
     positions = list(word_positions.values())
     nodes = [ROOT] + positions
 
+    # Vectorized score extraction: build the (dep x head) sub-matrix once
+    # instead of calling `.item()` for every pair in a Python double loop.
+    positions_t = torch.tensor(positions, dtype=torch.long)
+    nodes_t = torch.tensor(nodes, dtype=torch.long)
+    sub_scores = scores[positions_t][:, nodes_t]  # (D, H)
+    self_loop_mask = positions_t.unsqueeze(1) == nodes_t.unsqueeze(0)  # (D, H)
+    sub_scores = sub_scores.masked_fill(self_loop_mask, float("-inf"))
+
+    flat_order = torch.argsort(sub_scores.reshape(-1), descending=True).tolist()
+    num_heads = len(nodes)
+    flat_scores = sub_scores.reshape(-1).tolist()
     candidates = []
-    for dep in positions:
-        for head in nodes:
-            if dep == head:
-                continue
-            candidates.append((scores[dep, head].item(), dep, head))
-    candidates.sort(key=lambda x: x[0], reverse=True)
+    for idx in flat_order:
+        if flat_scores[idx] == float("-inf"):
+            break  # remaining entries are all masked self-loops
+        dep_i, head_i = divmod(idx, num_heads)
+        candidates.append((flat_scores[idx], positions[dep_i], nodes[head_i]))
 
     # Group by dependent (score-descending) for the fallback pass below.
     by_dep: Dict[int, list] = {}
@@ -125,7 +135,8 @@ def greedy_decode(scores: torch.Tensor, word_positions: Dict[int, int]) -> Dict[
     # cycle-avoidance and the single-root constraint rule out every
     # remaining candidate). Prefer the best-scoring head that still keeps
     # the tree cycle-free (ignoring the single-root cap); only as an
-    # absolute last resort accept a head that would close a cycle.
+    # absolute last resort accept a head that would close a cycle, and
+    # finally default to ROOT to guarantee every word gets a head.
     for dep in positions:
         if dep in assigned:
             continue
@@ -135,11 +146,10 @@ def greedy_decode(scores: torch.Tensor, word_positions: Dict[int, int]) -> Dict[
             if find(dep) != find(head):
                 chosen = head
                 break
-        if chosen is None and head_candidates:
-            chosen = head_candidates[0][1]
-        if chosen is not None:
-            assigned[dep] = chosen
-            union(dep, chosen)
+        if chosen is None:
+            chosen = head_candidates[0][1] if head_candidates else ROOT
+        assigned[dep] = chosen
+        union(dep, chosen)
 
     return {wid: assigned[pos] for wid, pos in word_positions.items()}
 
