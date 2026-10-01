@@ -166,12 +166,12 @@ def greedy_decode(scores: torch.Tensor, word_positions: Dict[int, int]) -> Dict[
     # remaining candidate). Preference order: (1) cycle-free head that
     # also respects the single-root cap, (2) cycle-free head ignoring the
     # single-root cap, (3) best-scoring head regardless of cycles. Stage
-    # (3) fully relaxes both constraints, so it always returns a candidate
-    # (every dependent has at least the ROOT edge in `by_dep`) — the final
-    # ``ROOT`` default only guards against a degenerate/empty candidate
-    # list and is not expected to be reached in practice. Note: ROOT is 0,
-    # so candidates must be compared against ``None`` explicitly rather
-    # than relying on truthiness.
+    # (3) fully relaxes both constraints, so it is guaranteed to return a
+    # candidate (every dependent has at least the ROOT edge in `by_dep`);
+    # the assertion below makes that invariant explicit so a violation is
+    # caught immediately instead of silently producing a malformed tree.
+    # Note: ROOT is 0, so candidates must be compared against ``None``
+    # explicitly rather than relying on truthiness.
     for dep in positions:
         if dep in assigned:
             continue
@@ -180,8 +180,11 @@ def greedy_decode(scores: torch.Tensor, word_positions: Dict[int, int]) -> Dict[
             chosen = pick_head(dep, relax_root_cap=True, relax_cycle_check=False)
         if chosen is None:
             chosen = pick_head(dep, relax_root_cap=True, relax_cycle_check=True)
-        if chosen is None:
-            chosen = ROOT
+        assert chosen is not None, (
+            f"pick_head returned None for dependent {dep} even with both "
+            "constraints fully relaxed; every dependent should have at "
+            "least a ROOT candidate in `by_dep`"
+        )
         assigned[dep] = chosen
         # Only merge components when the chosen arc doesn't already close
         # a cycle (relevant when it was picked under `relax_cycle_check`):

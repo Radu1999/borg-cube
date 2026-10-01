@@ -296,22 +296,28 @@ class ParserDataset(Dataset):
             seen_words.add(word_id)
             if word_id < len(tokens):
                 tok = tokens[word_id]
-                head = tok.head if tok.head is not None else 0
                 head_pos: Optional[int] = None
-                if head == 0:
+                if tok.head is None:
+                    # Unknown head (e.g. malformed CoNLL-U data) -> leave
+                    # the label ignored (-100) rather than silently
+                    # injecting a ROOT target, same treatment as the
+                    # truncated-head case below.
+                    pass
+                elif tok.head == 0:
                     head_pos = 0  # ROOT -> CLS position
                 else:
-                    # `head` is the gold token's 1-based CoNLL-U index into
-                    # `tokens` (`regular_tokens()`), and `word_id` (from
-                    # `encoding.word_ids()`, single-example call) is the
-                    # matching 0-based index into that same `forms`/`tokens`
-                    # list passed to `is_split_into_words=True` — so
-                    # `head - 1` is exactly the `word_id` of the head token.
-                    # The head word may have been truncated out of the
-                    # sequence (max_length); in that case there's no valid
-                    # target position, so leave the label ignored (-100)
-                    # instead of silently mislabeling it as ROOT.
-                    head_pos = word_positions.get(head - 1)
+                    # `tok.head` is the gold token's 1-based CoNLL-U index
+                    # into `tokens` (`regular_tokens()`), and `word_id`
+                    # (from `encoding.word_ids()`, single-example call) is
+                    # the matching 0-based index into that same
+                    # `forms`/`tokens` list passed to
+                    # `is_split_into_words=True` — so `tok.head - 1` is
+                    # exactly the `word_id` of the head token. The head
+                    # word may have been truncated out of the sequence
+                    # (max_length); in that case there's no valid target
+                    # position, so leave the label ignored (-100) instead
+                    # of silently mislabeling it as ROOT.
+                    head_pos = word_positions.get(tok.head - 1)
                 if head_pos is not None:
                     head_labels[i] = head_pos
                     deprel_labels[i] = self.deprel_vocab.get(
