@@ -125,15 +125,22 @@ def greedy_decode(scores: torch.Tensor, word_positions: Dict[int, int]) -> Dict[
 
     root_used = False
 
+    def is_allowed(dep: int, head: int, relax_root_cap: bool, relax_cycle_check: bool) -> bool:
+        """Shared constraint check used by both the main greedy pass and
+        the fallback `pick_head` below, so the root-cap/cycle rules can't
+        drift out of sync between the two call sites."""
+        if not relax_root_cap and head == ROOT and root_used:
+            return False
+        if not relax_cycle_check and find(dep) == find(head):
+            return False
+        return True
+
     def pick_head(dep: int, relax_root_cap: bool, relax_cycle_check: bool) -> Optional[int]:
         """Pick the best-scoring head for *dep* satisfying the active
         constraints, or ``None`` if no candidate qualifies."""
         for _, head in by_dep.get(dep, []):
-            if not relax_root_cap and head == ROOT and root_used:
-                continue
-            if not relax_cycle_check and find(dep) == find(head):
-                continue
-            return head
+            if is_allowed(dep, head, relax_root_cap, relax_cycle_check):
+                return head
         return None
 
     assigned: Dict[int, int] = {}
@@ -142,13 +149,12 @@ def greedy_decode(scores: torch.Tensor, word_positions: Dict[int, int]) -> Dict[
     # considered strictly in overall score order across all dependents
     # (the core of the greedy algorithm), whereas `pick_head` scans only
     # one dependent's own candidates and is used solely by the fallback
-    # pass below. The constraint checks (root cap + cycle) are the same.
+    # pass below. Both share the same `is_allowed` constraint check
+    # (root cap + cycle), so they can't drift out of sync.
     for score, dep, head in candidates:
         if dep in assigned:
             continue
-        if head == ROOT and root_used:
-            continue
-        if find(dep) == find(head):
+        if not is_allowed(dep, head, relax_root_cap=False, relax_cycle_check=False):
             continue
         assigned[dep] = head
         union(dep, head)
@@ -177,7 +183,14 @@ def greedy_decode(scores: torch.Tensor, word_positions: Dict[int, int]) -> Dict[
         if chosen is None:
             chosen = ROOT
         assigned[dep] = chosen
-        union(dep, chosen)
+        # Only merge components when the chosen arc doesn't already close
+        # a cycle (relevant when it was picked under `relax_cycle_check`):
+        # `find(dep) == find(chosen)` means they're already in the same
+        # component, so skipping the merge here avoids ever reassigning a
+        # root's parent pointer based on an arc that doesn't actually
+        # connect two distinct trees.
+        if find(dep) != find(chosen):
+            union(dep, chosen)
         if chosen == ROOT:
             root_used = True
 
