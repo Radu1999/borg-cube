@@ -1,5 +1,6 @@
 import torch
 from types import SimpleNamespace
+from unittest.mock import Mock
 from src.config import BorgConfig
 from src.models.tokenizer import TokenizerModel
 from src.data.conllu import Token, Sentence
@@ -71,6 +72,7 @@ def test_tokenizer_uses_overlapping_windows():
     model.config = SimpleNamespace(
         max_seq_length=10, resolve_device=lambda: "cpu"
     )
+    model.to = Mock(wraps=model.to)
     model.encoder = SimpleNamespace(
         config=SimpleNamespace(max_position_embeddings=6)
     )
@@ -87,6 +89,7 @@ def test_tokenizer_uses_overlapping_windows():
     model.forward = mock_forward
     text = "abcdefghijklmn"
     sentences = model.predict(text)
+    model.to.assert_called_once_with("cpu")
     observed_ids = [token_id for window in observed_windows for token_id in window]
 
     assert len(observed_ids) > len(text)
