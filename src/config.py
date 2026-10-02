@@ -7,7 +7,7 @@ from typing import List
 
 @dataclass
 class BorgConfig:
-    model_name: str = "microsoft/deberta-v3-base"
+    model_name: str = "microsoft/deberta-v3-large"
     max_seq_length: int = 512
     batch_size: int = 16
     learning_rate: float = 2e-4
