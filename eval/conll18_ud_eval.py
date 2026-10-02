@@ -176,22 +176,47 @@ def _feats_intersect(gold_feats: str, sys_feats: str) -> int:
     return len(g & s)
 
 
-def _mlas_correct(g: UDWord, s: UDWord, g_head_idx: Optional[int], s_head_idx: Optional[int]) -> bool:
+def _sentence_starts(sentences: List[UDSentence]) -> List[int]:
+    """For each flattened word (across all sentences), the global index of
+    the first word in that word's own sentence.
+
+    ``UDWord.head`` is a 1-based index that is only meaningful *within its
+    own sentence* (0 means the virtual ROOT). To compare a gold head with a
+    system head we first need to translate both into global positions in
+    the respective flattened word list.
+    """
+    starts: List[int] = []
+    pos = 0
+    for sent in sentences:
+        starts.extend([pos] * len(sent.words))
+        pos += len(sent.words)
+    return starts
+
+
+def _resolve_head_global(head: int, sent_start: int) -> int:
+    """Translate a sentence-relative head index into a global word index.
+
+    Returns ``-1`` as a sentinel for the virtual ROOT (head == 0).
+    """
+    if head == 0:
+        return -1
+    return sent_start + head - 1
+
+
+def _mlas_correct(g: UDWord, s: UDWord, heads_match: bool) -> bool:
     """MLAS: LAS + UPOS + FEATS on both dep and head."""
-    if g_head_idx is None or s_head_idx is None:
-        return False
     return (
-        g.head == s.head
+        heads_match
         and g.deprel.lower() == s.deprel.lower()
         and g.upos == s.upos
         and g.feats == s.feats
     )
 
 
-def _blex_correct(g: UDWord, s: UDWord) -> bool:
+def _blex_correct(g: UDWord, s: UDWord, heads_match: bool) -> bool:
     """BLEX: LAS + LEMMA."""
     return (
-        g.head == s.head
+        heads_match
         and g.deprel.lower() == s.deprel.lower()
         and g.lemma.lower() == s.lemma.lower()
     )
@@ -216,6 +241,12 @@ def evaluate(gold_file: str, system_file: str) -> Dict[str, EvalResult]:
 
     n_gold = len(gold_words)
     n_sys = len(sys_words)
+
+    # Per-word global sentence-start offsets, used to translate the
+    # sentence-relative `head` index into a position in the flattened word
+    # list (see `_resolve_head_global`).
+    gold_sent_starts = _sentence_starts(gold_sents)
+    sys_sent_starts = _sentence_starts(sys_sents)
 
     # Per-metric counters
     counts: Dict[str, int] = Counter()
@@ -243,25 +274,37 @@ def evaluate(gold_file: str, system_file: str) -> Dict[str, EvalResult]:
         if g_word.lemma.lower() == s_word.lemma.lower():
             counts["LEMMA_correct"] += 1
 
+        # Resolve each word's head through the alignment rather than
+        # comparing raw sentence-relative indices: `head` is only
+        # meaningful within its own sentence, so whenever gold/system
+        # token counts differ (e.g. a contraction segmented differently),
+        # raw indices drift out of sync even for otherwise-correct arcs.
+        # Instead, map the gold word's head to the *word* it points to,
+        # find that word's aligned system word, and check whether the
+        # system word's own head points to that same aligned word.
+        gold_head_global = _resolve_head_global(g_word.head, gold_sent_starts[g_idx])
+        gold_head_target_sys = (
+            -1 if gold_head_global == -1 else alignment[gold_head_global]
+        )
+        sys_head_value = _resolve_head_global(s_word.head, sys_sent_starts[sys_idx])
+        heads_match = (
+            gold_head_target_sys is not None and gold_head_target_sys == sys_head_value
+        )
+
         # UAS (head)
-        if g_word.head == s_word.head:
+        if heads_match:
             counts["UAS_correct"] += 1
 
         # LAS (head + deprel, case-insensitive deprel)
-        if g_word.head == s_word.head and g_word.deprel.lower() == s_word.deprel.lower():
+        if heads_match and g_word.deprel.lower() == s_word.deprel.lower():
             counts["LAS_correct"] += 1
 
         # MLAS: LAS + UPOS + FEATS
-        if (
-            g_word.head == s_word.head
-            and g_word.deprel.lower() == s_word.deprel.lower()
-            and g_word.upos == s_word.upos
-            and g_word.feats == s_word.feats
-        ):
+        if _mlas_correct(g_word, s_word, heads_match):
             counts["MLAS_correct"] += 1
 
         # BLEX: LAS + LEMMA
-        if _blex_correct(g_word, s_word):
+        if _blex_correct(g_word, s_word, heads_match):
             counts["BLEX_correct"] += 1
 
     aligned = counts["Tokens_aligned"]

@@ -310,6 +310,47 @@ class TestEvaluation(unittest.TestCase):
             os.unlink(gold_path)
             os.unlink(wrong_path)
 
+    def test_uas_survives_tokenization_mismatch(self):
+        """A correct dependency attachment must not be penalized just
+        because an earlier token in the sentence was segmented
+        differently by the system (regression test: UAS/LAS used to
+        compare raw sentence-relative head indices directly, so any
+        token-count drift before a word silently shifted what its head
+        index "meant", making otherwise-correct arcs count as wrong).
+        """
+        from eval.conll18_ud_eval import evaluate
+        gold_conllu = textwrap.dedent("""\
+            1\tI\tI\tPRON\tPRP\t_\t4\tnsubj\t_\t_
+            2\tdo\tdo\tAUX\tVBP\t_\t4\taux\t_\t_
+            3\tn't\tnot\tPART\tRB\t_\t4\tadvmod\t_\t_
+            4\tknow\tknow\tVERB\tVBP\t_\t0\troot\t_\t_
+            5\t.\t.\tPUNCT\t.\t_\t4\tpunct\t_\t_
+
+        """)
+        # System under-segments the contraction ("do" + "n't" -> "don't"),
+        # dropping one token, but every surviving word's attachment is
+        # semantically identical to gold (both point to "know"/ROOT).
+        sys_conllu = textwrap.dedent("""\
+            1\tI\tI\tPRON\tPRP\t_\t3\tnsubj\t_\t_
+            2\tdon't\tdo not\tAUX\tVBP\t_\t3\taux\t_\t_
+            3\tknow\tknow\tVERB\tVBP\t_\t0\troot\t_\t_
+            4\t.\t.\tPUNCT\t.\t_\t3\tpunct\t_\t_
+
+        """)
+        gold_path = self._write_tmp(gold_conllu)
+        sys_path = self._write_tmp(sys_conllu)
+        try:
+            results = evaluate(gold_path, sys_path)
+            # "I", "know" and "." are aligned (identical forms) and all
+            # three have a semantically-correct attachment to "know" /
+            # ROOT, so UAS/LAS should match the Tokens alignment rate
+            # exactly rather than collapsing further.
+            self.assertAlmostEqual(results["UAS"].f1, results["Tokens"].f1, places=4)
+            self.assertAlmostEqual(results["LAS"].f1, results["Tokens"].f1, places=4)
+        finally:
+            os.unlink(gold_path)
+            os.unlink(sys_path)
+
     def test_result_fields(self):
         from eval.conll18_ud_eval import evaluate, EvalResult
         path = self._write_tmp(SAMPLE_CONLLU)
