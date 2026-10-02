@@ -45,6 +45,10 @@ class TokenizerModel(BorgBaseModel):
         return {"classifier": self.classifier.state_dict()}
 
     def _set_extras(self, extras: Dict[str, Any]) -> None:
+        # `BorgBaseModel.load` reconstructs instances via `BorgBaseModel.__init__`
+        # rather than `TokenizerModel.__init__`, so `self.classifier` may not
+        # exist yet. Rebuild it before loading the saved weights.
+        self.classifier = nn.Linear(self.hidden_size, self.NUM_LABELS)
         self.classifier.load_state_dict(extras["classifier"])
 
     # ------------------------------------------------------------------
