@@ -171,6 +171,7 @@ class TokenizerModel(BorgBaseModel):
 
         # track the end of the last processed subword to detect whitespace
         last_end = 0
+        pending_whitespace = False
 
         for i, (start, end) in enumerate(offset_mapping):
             if start == 0 and end == 0:
@@ -190,6 +191,17 @@ class TokenizerModel(BorgBaseModel):
             # between the previous subword and this one, or whitespace
             # embedded at the start of this subword's own offset span.
             whitespace_before = text[last_end:start] + leading_ws
+            if not subword:
+                pending_whitespace = (
+                    pending_whitespace
+                    or bool(whitespace_before)
+                    or raw_subword.isspace()
+                )
+                last_end = end
+                continue
+            if pending_whitespace:
+                whitespace_before = " " + whitespace_before
+            pending_whitespace = False
 
             if label == TokenizerDataset.SENTENCE_START:
                 # Flush any pending token from the previous sentence
@@ -245,7 +257,7 @@ class TokenizerModel(BorgBaseModel):
         # Flush remaining
         if current_form_chars and current_sentence is not None:
             # Check if there's whitespace at the very end of the text
-            has_space = len(text[last_end:]) > 0
+            has_space = pending_whitespace or len(text[last_end:]) > 0
             current_sentence.tokens.append(
                 Token(id=current_token_id, form="".join(current_form_chars), space_after=has_space)
             )

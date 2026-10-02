@@ -156,5 +156,49 @@ def test_tokenizer_handles_subword_offsets_that_include_leading_whitespace():
     assert tokens[1].form == "B" and tokens[1].space_after is False
 
 
+def test_tokenizer_skips_whitespace_only_offsets():
+    class FakeTokenizer:
+        def __call__(self, text, **kwargs):
+            input_ids = [1000, 1001, 1002] if text == "A B" else [1000, 1001]
+            return {
+                "input_ids": input_ids,
+                "offset_mapping": [(i, i + 1) for i in range(len(text))],
+            }
+
+        def num_special_tokens_to_add(self, pair=False):
+            return 2
+
+        def prepare_for_model(self, token_ids, add_special_tokens, return_attention_mask):
+            input_ids = [101, *token_ids, 102]
+            return {"input_ids": input_ids, "attention_mask": [1] * len(input_ids)}
+
+        def get_special_tokens_mask(self, token_ids, already_has_special_tokens):
+            return [1, *([0] * len(token_ids)), 1]
+
+    model = TokenizerModel.__new__(TokenizerModel)
+    torch.nn.Module.__init__(model)
+    model.config = SimpleNamespace(max_seq_length=10, resolve_device=lambda: "cpu")
+    model.encoder = SimpleNamespace(config=SimpleNamespace(max_position_embeddings=10))
+    model.hf_tokenizer = FakeTokenizer()
+
+    def mock_forward(input_ids, attention_mask):
+        logits = torch.zeros((1, input_ids.size(1), TokenizerModel.NUM_LABELS))
+        labels = {1000: 2, 1001: 1, 1002: 1}
+        for i, token_id in enumerate(input_ids[0].tolist()):
+            logits[0, i, labels.get(token_id, 0)] = 1
+        return logits
+
+    model.forward = mock_forward
+    sentences = model.predict("A B")
+
+    assert len(sentences) == 1
+    assert [token.form for token in sentences[0].tokens] == ["A", "B"]
+    assert sentences[0].tokens[0].space_after is True
+
+    trailing_space = model.predict("A ")
+    assert [token.form for token in trailing_space[0].tokens] == ["A"]
+    assert trailing_space[0].tokens[0].space_after is True
+
+
 if __name__ == "__main__":
     test_tokenizer_whitespace()
