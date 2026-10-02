@@ -113,6 +113,7 @@ class TokenizerModel(BorgBaseModel):
         """Segment *text* into sentences and tokens, preserving whitespace."""
         device = self.config.resolve_device()
         self.eval()
+        self.to(device)
 
         hf_tok = self.hf_tokenizer
         encoding = hf_tok(
