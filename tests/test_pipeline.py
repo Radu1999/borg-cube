@@ -236,15 +236,14 @@ class TestEditScripts(unittest.TestCase):
 
     def test_identity(self):
         from src.data.dataset import _compute_edit_script
-        from src.models.lemmatizer import _apply_edit_script
         script = _compute_edit_script("cat", "cat")
-        self.assertIn("k", script)
+        self.assertIn("s", script)
 
     def test_simple_suffix(self):
         from src.data.dataset import _compute_edit_script
         script = _compute_edit_script("running", "run")
-        # prefix 3 (run), strip 4 (ning), add ""
-        self.assertTrue(script.startswith("k3"))
+        # strip 4 ("ning"), add ""
+        self.assertTrue(script.startswith("s4"))
 
     def test_apply_reconstructs(self):
         from src.data.dataset import _compute_edit_script
@@ -258,8 +257,24 @@ class TestEditScripts(unittest.TestCase):
         for form, lemma in pairs:
             script = _compute_edit_script(form, lemma)
             reconstructed = _apply_edit_script(form, script)
-            # We just check it doesn't crash and returns a string
-            self.assertIsInstance(reconstructed, str)
+            self.assertEqual(reconstructed, lemma.lower())
+
+    def test_script_generalizes_across_word_lengths(self):
+        """A script learned from one word must reconstruct correctly when
+        applied to a different word of a different length that undergoes
+        the same suffix transformation (regression test for issue #28:
+        edit scripts used to bake in the absolute prefix length, which
+        made every word length require its own, effectively unseen,
+        class and collapsed LEMMA accuracy in the full pipeline).
+        """
+        from src.data.dataset import _compute_edit_script
+        from src.models.lemmatizer import _apply_edit_script
+
+        # Learn the "strip trailing -ing" script from a short word...
+        script = _compute_edit_script("running", "run")
+        # ...and apply it to a longer, unseen word needing the same edit.
+        self.assertEqual(_apply_edit_script("swimming", script), "swim")
+        self.assertEqual(_apply_edit_script("jogging", script), "jog")
 
 
 # ---------------------------------------------------------------------------

@@ -18,20 +18,27 @@ from src.models.checkpoints import save_training_models
 
 
 def _apply_edit_script(form: str, script: str) -> str:
-    """Reconstruct a lemma from a form and an edit script."""
+    """Reconstruct a lemma from a form and an edit script.
+
+    The script only encodes how many characters to strip from the *end*
+    of the form and what to append (see ``_compute_edit_script``), so the
+    number of characters to keep is derived from the form's own length
+    here. This makes a single learned script (e.g. "strip 4, add
+    nothing") applicable to forms of any length, instead of being tied to
+    the specific word length it was learned from.
+    """
+    form_l = form.lower()
     try:
         parts = script.split(":")
-        prefix_keep = int(parts[0][1:])  # k<n>
-        suffix_strip = int(parts[1][1:])  # s<n>
-        suffix_add = parts[2][1:] if len(parts) > 2 else ""  # a<str>
+        suffix_strip = int(parts[0][1:])  # s<n>
+        suffix_add = parts[1][1:] if len(parts) > 1 else ""  # a<str>
     except (IndexError, ValueError):
-        return form.lower()
+        return form_l
 
-    stem = form.lower()[:prefix_keep]
-    if suffix_strip > 0 and len(form) - suffix_strip > prefix_keep:
-        pass  # strip is relative to the original tail already
+    prefix_keep = max(0, len(form_l) - suffix_strip)
+    stem = form_l[:prefix_keep]
     lemma = stem + suffix_add
-    return lemma if lemma else form.lower()
+    return lemma if lemma else form_l
 
 
 class LemmatizerModel(BorgBaseModel):
@@ -194,7 +201,7 @@ class LemmatizerModel(BorgBaseModel):
             word_scripts: Dict[int, str] = {}
             for i, wid in enumerate(word_ids):
                 if wid is not None and wid not in word_scripts:
-                    word_scripts[wid] = inv_script.get(script_preds[i], "k0:s0:a")
+                    word_scripts[wid] = inv_script.get(script_preds[i], "s0:a")
 
             new_sent = Sentence(comments=sent.comments)
             for tok in sent.tokens:
@@ -202,7 +209,7 @@ class LemmatizerModel(BorgBaseModel):
                     new_sent.tokens.append(tok)
                     continue
                 tid = tok.id - 1
-                script = word_scripts.get(tid, "k0:s0:a")
+                script = word_scripts.get(tid, "s0:a")
                 lemma = _apply_edit_script(tok.form, script)
                 new_tok = Token(
                     id=tok.id, form=tok.form, lemma=lemma,

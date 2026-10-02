@@ -339,11 +339,24 @@ class ParserDataset(Dataset):
 def _compute_edit_script(form: str, lemma: str) -> str:
     """Encode lemma as an edit script relative to the form.
 
-    Strategy: find the longest common prefix and suffix, then record
-    how many characters to strip from the end and what to append.
+    Strategy: find the longest common prefix, then record how many
+    characters to strip from the *end* of the form and what to append
+    to reconstruct the lemma.
 
-    Returns a string like "keep3:strip2:add+en" which is compact enough
-    to classify.
+    The script is intentionally anchored on the number of characters to
+    strip from the end (and the characters to add) rather than on the
+    absolute number of characters to keep from the start. The number of
+    characters to keep varies with the length of the word even for the
+    exact same morphological transformation (e.g. stripping a "-ing"
+    suffix keeps 3 characters of "running" but 4 of "swimming"), so
+    baking it into the script identity would make classes needlessly
+    word-length-specific and prevent the model from generalizing a
+    single edit rule across words of different lengths. Strip/add are
+    invariant to word length, so they are used as the class identity;
+    the amount to keep from the start is simply derived from the form's
+    own length at application time (``len(form) - strip``).
+
+    Returns a string like "s2:add+en" which is compact enough to classify.
     """
     form_l = form.lower()
     lemma_l = lemma.lower()
@@ -364,7 +377,7 @@ def _compute_edit_script(form: str, lemma: str) -> str:
     strip = len(form_tail)
     add = lemma_tail
 
-    return f"k{prefix_len}:s{strip}:a{add}"
+    return f"s{strip}:a{add}"
 
 
 class LemmatizerDataset(Dataset):
