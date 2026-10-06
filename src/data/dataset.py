@@ -232,7 +232,7 @@ class TaggerDataset(Dataset):
             is_split_into_words=True,
             max_length=self.max_length,
             truncation=True,
-            padding="max_length",
+            padding=False,
             return_tensors="pt",
         )
         input_ids = encoding["input_ids"].squeeze(0)
@@ -475,7 +475,7 @@ class LemmatizerDataset(Dataset):
             is_split_into_words=True,
             max_length=self.max_length,
             truncation=True,
-            padding="max_length",
+            padding=False,
             return_tensors="pt",
         )
         input_ids = encoding["input_ids"].squeeze(0)
