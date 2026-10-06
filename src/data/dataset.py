@@ -58,12 +58,11 @@ class TokenizerDataset(Dataset):
         self._build_examples(sentences)
     
     def collate_fn(self, batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
-        """Right-pad parser examples to the longest sequence in this batch."""
+        """Right-pad tokenizer examples to the longest sequence in this batch."""
         padding_values = {
             "input_ids": self.hf_tok.pad_token_id,
             "attention_mask": 0,
-            "head_labels": -100,
-            "deprel_labels": -100,
+            "labels": -100,
         }
         return {
             key: pad_sequence(
@@ -206,12 +205,13 @@ class TaggerDataset(Dataset):
         return len(self.sentences)
     
     def collate_fn(self, batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
-        """Right-pad parser examples to the longest sequence in this batch."""
+        """Right-pad tagger examples to the longest sequence in this batch."""
         padding_values = {
             "input_ids": self.hf_tok.pad_token_id,
             "attention_mask": 0,
-            "head_labels": -100,
-            "deprel_labels": -100,
+            "upos_labels": -100,
+            "xpos_labels": -100,
+            "feats_labels": -100,
         }
         return {
             key: pad_sequence(
@@ -449,12 +449,12 @@ class LemmatizerDataset(Dataset):
         return len(self.sentences)
     
     def collate_fn(self, batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
-        """Right-pad parser examples to the longest sequence in this batch."""
+        """Right-pad lemmatizer examples to the longest sequence in this batch."""
         padding_values = {
             "input_ids": self.hf_tok.pad_token_id,
             "attention_mask": 0,
-            "head_labels": -100,
-            "deprel_labels": -100,
+            "upos_ids": 0,
+            "script_labels": -100,
         }
         return {
             key: pad_sequence(
