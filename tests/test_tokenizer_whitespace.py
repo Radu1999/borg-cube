@@ -50,6 +50,8 @@ def test_tokenizer_whitespace():
 
 def test_tokenizer_uses_overlapping_windows():
     class FakeTokenizer:
+        pad_token_id = 0
+
         def __call__(self, text, **kwargs):
             assert "return_tensors" not in kwargs
             return {
@@ -70,7 +72,8 @@ def test_tokenizer_uses_overlapping_windows():
     model = TokenizerModel.__new__(TokenizerModel)
     torch.nn.Module.__init__(model)
     model.config = SimpleNamespace(
-        max_seq_length=10, resolve_device=lambda: "cpu"
+        max_seq_length=10, resolve_device=lambda: "cpu",
+        dtype=torch.bfloat16, eval_batch_size=2,
     )
     model.to = Mock(wraps=model.to)
     model.encoder = SimpleNamespace(
@@ -80,10 +83,12 @@ def test_tokenizer_uses_overlapping_windows():
     observed_windows = []
 
     def mock_forward(input_ids, attention_mask):
-        observed_windows.append(input_ids[0, 1:-1].tolist())
-        logits = torch.zeros((1, input_ids.size(1), TokenizerModel.NUM_LABELS))
-        for i, token_id in enumerate(input_ids[0].tolist()):
-            logits[0, i, 2 if token_id == ord("a") else 0] = 1
+        logits = torch.zeros((*input_ids.shape, TokenizerModel.NUM_LABELS))
+        for row in range(input_ids.size(0)):
+            length = int(attention_mask[row].sum())
+            observed_windows.append(input_ids[row, 1:length - 1].tolist())
+            for i, token_id in enumerate(input_ids[row].tolist()):
+                logits[row, i, 2 if token_id == ord("a") else 0] = 1
         return logits
 
     model.forward = mock_forward
@@ -114,6 +119,8 @@ def test_tokenizer_handles_subword_offsets_that_include_leading_whitespace():
     # for "B". `predict` must strip that leading whitespace out of the
     # reconstructed token form and still detect the space correctly.
     class FakeTokenizer:
+        pad_token_id = 0
+
         def __call__(self, text, **kwargs):
             return {
                 "input_ids": [1000, 1001],
@@ -132,7 +139,10 @@ def test_tokenizer_handles_subword_offsets_that_include_leading_whitespace():
 
     model = TokenizerModel.__new__(TokenizerModel)
     torch.nn.Module.__init__(model)
-    model.config = SimpleNamespace(max_seq_length=10, resolve_device=lambda: "cpu")
+    model.config = SimpleNamespace(
+        max_seq_length=10, resolve_device=lambda: "cpu",
+        dtype=torch.bfloat16, eval_batch_size=2,
+    )
     model.encoder = SimpleNamespace(config=SimpleNamespace(max_position_embeddings=10))
     model.hf_tokenizer = FakeTokenizer()
 
@@ -158,6 +168,8 @@ def test_tokenizer_handles_subword_offsets_that_include_leading_whitespace():
 
 def test_tokenizer_skips_whitespace_only_offsets():
     class FakeTokenizer:
+        pad_token_id = 0
+
         def __call__(self, text, **kwargs):
             input_ids = [1000, 1001, 1002] if text == "A B" else [1000, 1001]
             return {
@@ -177,7 +189,10 @@ def test_tokenizer_skips_whitespace_only_offsets():
 
     model = TokenizerModel.__new__(TokenizerModel)
     torch.nn.Module.__init__(model)
-    model.config = SimpleNamespace(max_seq_length=10, resolve_device=lambda: "cpu")
+    model.config = SimpleNamespace(
+        max_seq_length=10, resolve_device=lambda: "cpu",
+        dtype=torch.bfloat16, eval_batch_size=2,
+    )
     model.encoder = SimpleNamespace(config=SimpleNamespace(max_position_embeddings=10))
     model.hf_tokenizer = FakeTokenizer()
 

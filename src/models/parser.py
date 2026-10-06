@@ -1,6 +1,7 @@
 """Dependency parser: biaffine attention for HEAD + linear head for DEPREL."""
 
 from __future__ import annotations
+from dataclasses import replace
 
 from typing import Any, Dict, List, Optional
 
@@ -14,6 +15,7 @@ from src.config import BorgConfig
 from src.data.conllu import Sentence, Token
 from src.data.dataset import ParserDataset, _build_vocab
 from src.models.base import BorgBaseModel
+from src.models.inference import sentence_batches
 from src.models.evaluation import (
     average_f1,
     evaluate_predictions,
@@ -642,156 +644,60 @@ class ParserModel(BorgBaseModel):
             for k, v in self.deprel_vocab.items()
         }
 
-        hf_tok = self.hf_tokenizer
-        results: List[Sentence] = []
-
-        for sent in sentences:
-            tokens = sent.regular_tokens()
-
-            if not tokens:
-                results.append(sent)
-                continue
-
-            forms = [
-                t.form
-                for t in tokens
-            ]
-
-            encoding = hf_tok(
-                forms,
-                is_split_into_words=True,
-                max_length=self.config.max_seq_length,
-                truncation=True,
-                return_tensors="pt",
-            )
-
-            word_ids = encoding.word_ids(
-                batch_index=0
-            )
-
-            input_ids = encoding[
-                "input_ids"
-            ].to(device)
-
-            attention_mask = encoding[
-                "attention_mask"
-            ].to(device)
-
-            with torch.no_grad(), torch.autocast(
+        results = list(sentences)
+        for batch in sentence_batches(self, sentences):
+            with torch.inference_mode(), torch.autocast(
                 device_type=device_type,
                 dtype=self.config.dtype,
                 enabled=device_type == "cuda",
             ):
-                arc_scores, rel_scores = self(
-                    input_ids,
-                    attention_mask,
+                hidden = self.encode(
+                    batch.input_ids.to(device),
+                    batch.attention_mask.to(device),
                 )
+                arc_scores = self.arc_biaffine(
+                    self.arc_dep_mlp(hidden),
+                    self.arc_head_mlp(hidden),
+                )
+                rel_dep = self.rel_dep_mlp(hidden)
+                rel_head = self.rel_head_mlp(hidden)
 
-            arc_scores_sq = arc_scores.squeeze(0)
-            rel_scores_sq = rel_scores.squeeze(0)
-
-            # Map sub-word positions back to word positions.
-            word_positions: Dict[int, int] = {}
-
-            for i, wid in enumerate(word_ids):
-                if (
-                    wid is not None
-                    and wid not in word_positions
-                ):
-                    word_positions[wid] = i
-
-            inv_word_positions = {
-                pos: wid
-                for wid, pos
-                in word_positions.items()
-            }
-
-            # Greedy decoding guarantees a (near) well-formed tree.
-            head_positions = greedy_decode(
-                arc_scores_sq,
-                word_positions,
-            )
-
-            word_heads: Dict[int, int] = {}
-            word_deprels: Dict[int, str] = {}
-
-            for wid, pos in word_positions.items():
-                pred_head_pos = head_positions[wid]
-
-                if pred_head_pos == 0:
-                    word_heads[wid] = 0
-                else:
-                    pred_head_wid = (
-                        inv_word_positions.get(
-                            pred_head_pos
+                for row, index in enumerate(batch.indices):
+                    word_positions = batch.word_positions[row]
+                    inv_positions = {pos: wid for wid, pos in word_positions.items()}
+                    head_positions = greedy_decode(arc_scores[row], word_positions)
+                    word_heads = {
+                        wid: 0 if head == 0 else inv_positions[head] + 1
+                        for wid, head in head_positions.items()
+                    }
+                    word_deprels: Dict[int, str] = {}
+                    if word_positions:
+                        dep_positions = list(word_positions.values())
+                        heads = [head_positions[wid] for wid in word_positions]
+                        # Treat selected arcs as length-one sequences, not an N x N grid.
+                        rel_scores = self.rel_biaffine(
+                            rel_dep[row, dep_positions].unsqueeze(1),
+                            rel_head[row, heads].unsqueeze(1),
                         )
-                    )
+                        rel_ids = rel_scores[:, 0, 0].argmax(-1).cpu().tolist()
+                        word_deprels = {
+                            wid: inv_deprel.get(rel_id, "_")
+                            for wid, rel_id in zip(word_positions, rel_ids)
+                        }
 
-                    assert pred_head_wid is not None, (
-                        "greedy_decode returned an unknown "
-                        f"head position {pred_head_pos} "
-                        f"for word {wid}"
-                    )
-
-                    word_heads[wid] = (
-                        pred_head_wid + 1
-                    )
-
-                rel_logits = rel_scores_sq[
-                    pos,
-                    pred_head_pos,
-                ]
-
-                rel_id = (
-                    rel_logits
-                    .argmax(-1)
-                    .item()
-                )
-
-                word_deprels[wid] = (
-                    inv_deprel.get(
-                        rel_id,
-                        "_",
-                    )
-                )
-
-            new_sent = Sentence(
-                comments=sent.comments
-            )
-
-            for tok in sent.tokens:
-                if (
-                    tok.is_multiword()
-                    or tok.is_empty()
-                ):
-                    new_sent.tokens.append(tok)
-                    continue
-
-                tid = tok.id - 1
-
-                new_tok = Token(
-                    id=tok.id,
-                    form=tok.form,
-                    lemma=tok.lemma,
-                    upos=tok.upos,
-                    xpos=tok.xpos,
-                    feats=tok.feats,
-                    head=word_heads.get(
-                        tid,
-                        0,
-                    ),
-                    deprel=word_deprels.get(
-                        tid,
-                        "_",
-                    ),
-                    deps=tok.deps,
-                    misc=tok.misc,
-                )
-
-                new_sent.tokens.append(
-                    new_tok
-                )
-
-            results.append(new_sent)
+                    sent = sentences[index]
+                    new_sent = Sentence(comments=sent.comments)
+                    for tok in sent.tokens:
+                        if tok.is_multiword() or tok.is_empty():
+                            new_sent.tokens.append(tok)
+                            continue
+                        new_sent.tokens.append(
+                            replace(
+                                tok,
+                                head=word_heads.get(tok.id - 1, 0),
+                                deprel=word_deprels.get(tok.id - 1, "_"),
+                            )
+                        )
+                    results[index] = new_sent
 
         return results

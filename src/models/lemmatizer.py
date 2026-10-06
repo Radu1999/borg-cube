@@ -1,5 +1,6 @@
 """Lemmatizer model: edit-script classification."""
 from __future__ import annotations
+from dataclasses import replace
 
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +18,7 @@ from src.data.dataset import (
     _compute_edit_script,
 )
 from src.models.base import BorgBaseModel
+from src.models.inference import sentence_batches
 from src.models.evaluation import (
     average_f1,
     evaluate_predictions,
@@ -323,144 +325,46 @@ class LemmatizerModel(BorgBaseModel):
             for k, v in self.script_vocab.items()
         }
 
-        hf_tok = self.hf_tokenizer
-        results: List[Sentence] = []
+        results = list(sentences)
+        for batch in sentence_batches(self, sentences):
+            upos_ids = torch.zeros_like(batch.input_ids)
+            for row, word_ids in enumerate(batch.word_ids):
+                token_upos = [
+                    self.upos_vocab.get(token.upos, self.upos_vocab["<UNK>"])
+                    for token in batch.tokens[row]
+                ]
+                upos_ids[row, :len(word_ids)] = torch.tensor(
+                    [token_upos[wid] if wid is not None else 0 for wid in word_ids],
+                    dtype=torch.long,
+                )
 
-        for sent in sentences:
-            tokens = sent.regular_tokens()
-
-            if not tokens:
-                results.append(sent)
-                continue
-
-            forms = [
-                t.form
-                for t in tokens
-            ]
-
-            upos_list = [
-                t.upos
-                for t in tokens
-            ]
-
-            encoding = hf_tok(
-                forms,
-                is_split_into_words=True,
-                max_length=self.config.max_seq_length,
-                truncation=True,
-                return_tensors="pt",
-            )
-
-            word_ids = encoding.word_ids(
-                batch_index=0
-            )
-
-            seq_len = encoding[
-                "input_ids"
-            ].size(1)
-
-            upos_ids_list = [0] * seq_len
-
-            for i, wid in enumerate(word_ids):
-                if (
-                    wid is not None
-                    and wid < len(upos_list)
-                ):
-                    upos_ids_list[i] = (
-                        self.upos_vocab.get(
-                            upos_list[wid],
-                            self.upos_vocab["<UNK>"],
-                        )
-                    )
-
-            input_ids = encoding[
-                "input_ids"
-            ].to(device)
-
-            attention_mask = encoding[
-                "attention_mask"
-            ].to(device)
-
-            upos_ids = torch.tensor(
-                [upos_ids_list],
-                dtype=torch.long,
-                device=device,
-            )
-
-            with torch.no_grad(), torch.autocast(
+            with torch.inference_mode(), torch.autocast(
                 device_type=device_type,
                 dtype=self.config.dtype,
                 enabled=device_type == "cuda",
             ):
                 logits = self(
-                    input_ids,
-                    attention_mask,
-                    upos_ids,
+                    batch.input_ids.to(device),
+                    batch.attention_mask.to(device),
+                    upos_ids.to(device),
                 )
+                script_preds = logits.argmax(-1).cpu().tolist()
 
-            script_preds = (
-                logits
-                .squeeze(0)
-                .argmax(-1)
-                .cpu()
-                .tolist()
-            )
-
-            word_scripts: Dict[int, str] = {}
-
-            for i, wid in enumerate(word_ids):
-                if (
-                    wid is not None
-                    and wid not in word_scripts
-                ):
-                    word_scripts[wid] = (
-                        inv_script.get(
-                            script_preds[i],
-                            "k0:s0:a",
-                        )
+            for row, index in enumerate(batch.indices):
+                sent = sentences[index]
+                word_scripts = {
+                    wid: inv_script.get(script_preds[row][pos], "k0:s0:a")
+                    for wid, pos in batch.word_positions[row].items()
+                }
+                new_sent = Sentence(comments=sent.comments)
+                for tok in sent.tokens:
+                    if tok.is_multiword() or tok.is_empty():
+                        new_sent.tokens.append(tok)
+                        continue
+                    script = word_scripts.get(tok.id - 1, "k0:s0:a")
+                    new_sent.tokens.append(
+                        replace(tok, lemma=_apply_edit_script(tok.form, script))
                     )
-
-            new_sent = Sentence(
-                comments=sent.comments
-            )
-
-            for tok in sent.tokens:
-                if (
-                    tok.is_multiword()
-                    or tok.is_empty()
-                ):
-                    new_sent.tokens.append(tok)
-                    continue
-
-                tid = tok.id - 1
-
-                script = word_scripts.get(
-                    tid,
-                    "k0:s0:a",
-                )
-
-                lemma = _apply_edit_script(
-                    tok.form,
-                    script,
-                )
-
-                new_tok = Token(
-                    id=tok.id,
-                    form=tok.form,
-                    lemma=lemma,
-                    upos=tok.upos,
-                    xpos=tok.xpos,
-                    feats=tok.feats,
-                    head=tok.head,
-                    deprel=tok.deprel,
-                    deps=tok.deps,
-                    misc=tok.misc,
-                )
-
-                new_sent.tokens.append(
-                    new_tok
-                )
-
-            results.append(new_sent)
+                results[index] = new_sent
 
         return results

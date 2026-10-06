@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -14,6 +15,7 @@ from src.config import BorgConfig
 from src.data.conllu import Sentence, Token
 from src.data.dataset import TaggerDataset, _build_vocab, _feats_to_str
 from src.models.base import BorgBaseModel
+from src.models.inference import sentence_batches
 from src.models.evaluation import (
     average_f1,
     evaluate_predictions,
@@ -281,107 +283,39 @@ class TaggerModel(BorgBaseModel):
             v: k for k, v in self.feats_vocab.items()
         }
 
-        results: List[Sentence] = []
-        hf_tok = self.hf_tokenizer
-
-        for sent in sentences:
-            tokens = sent.regular_tokens()
-
-            if not tokens:
-                results.append(sent)
-                continue
-
-            forms = [t.form for t in tokens]
-
-            encoding = hf_tok(
-                forms,
-                is_split_into_words=True,
-                max_length=self.config.max_seq_length,
-                truncation=True,
-                return_tensors="pt",
-            )
-
-            word_ids = encoding.word_ids(batch_index=0)
-            input_ids = encoding["input_ids"].to(device)
-            attention_mask = encoding["attention_mask"].to(device)
-
-            with torch.no_grad(), torch.autocast(
+        results = list(sentences)
+        for batch in sentence_batches(self, sentences):
+            with torch.inference_mode(), torch.autocast(
                 device_type=device_type,
                 dtype=self.config.dtype,
                 enabled=device_type == "cuda",
             ):
                 u_logits, x_logits, f_logits = self(
-                    input_ids,
-                    attention_mask,
+                    batch.input_ids.to(device),
+                    batch.attention_mask.to(device),
                 )
+                predictions = torch.stack(
+                    [u_logits.argmax(-1), x_logits.argmax(-1), f_logits.argmax(-1)],
+                    dim=-1,
+                ).cpu().tolist()
 
-            u_preds = (
-                u_logits
-                .squeeze(0)
-                .argmax(-1)
-                .cpu()
-                .tolist()
-            )
-
-            x_preds = (
-                x_logits
-                .squeeze(0)
-                .argmax(-1)
-                .cpu()
-                .tolist()
-            )
-
-            f_preds = (
-                f_logits
-                .squeeze(0)
-                .argmax(-1)
-                .cpu()
-                .tolist()
-            )
-
-            word_to_pos: Dict[int, tuple] = {}
-
-            for i, wid in enumerate(word_ids):
-                if wid is None or wid in word_to_pos:
-                    continue
-
-                word_to_pos[wid] = (
-                    inv_upos.get(u_preds[i], "_"),
-                    inv_xpos.get(x_preds[i], "_"),
-                    inv_feats.get(f_preds[i], "_"),
-                )
-
-            new_sent = Sentence(
-                comments=sent.comments
-            )
-
-            for tok in sent.tokens:
-                if tok.is_multiword() or tok.is_empty():
-                    new_sent.tokens.append(tok)
-                    continue
-
-                tid = tok.id - 1  # 0-based index
-
-                upos, xpos, feats_str = word_to_pos.get(
-                    tid,
-                    ("_", "_", "_"),
-                )
-
-                new_tok = Token(
-                    id=tok.id,
-                    form=tok.form,
-                    lemma=tok.lemma,
-                    upos=upos,
-                    xpos=xpos,
-                    feats=feats_str,
-                    head=tok.head,
-                    deprel=tok.deprel,
-                    deps=tok.deps,
-                    misc=tok.misc,
-                )
-
-                new_sent.tokens.append(new_tok)
-
-            results.append(new_sent)
+            for row, index in enumerate(batch.indices):
+                sent = sentences[index]
+                word_tags = {
+                    wid: (
+                        inv_upos.get(predictions[row][pos][0], "_"),
+                        inv_xpos.get(predictions[row][pos][1], "_"),
+                        inv_feats.get(predictions[row][pos][2], "_"),
+                    )
+                    for wid, pos in batch.word_positions[row].items()
+                }
+                new_sent = Sentence(comments=sent.comments)
+                for tok in sent.tokens:
+                    if tok.is_multiword() or tok.is_empty():
+                        new_sent.tokens.append(tok)
+                        continue
+                    upos, xpos, feats = word_tags.get(tok.id - 1, ("_", "_", "_"))
+                    new_sent.tokens.append(replace(tok, upos=upos, xpos=xpos, feats=feats))
+                results[index] = new_sent
 
         return results

@@ -6,6 +6,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 import torch
+from torch.nn.utils.rnn import pad_sequence
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -222,36 +223,36 @@ class TokenizerModel(BorgBaseModel):
             (len(token_ids), self.NUM_LABELS)
         )
         score_counts = torch.zeros(len(token_ids))
+        batch_size = self.config.eval_batch_size
+        if batch_size < 1:
+            raise ValueError("eval_batch_size must be positive")
+        window_starts = range(0, len(token_ids), window_step)
 
-        with torch.no_grad():
-            for window_start in range(
-                0,
-                len(token_ids),
-                window_step,
-            ):
-                window_end = min(
-                    window_start + window_size,
-                    len(token_ids),
-                )
-
-                window_ids = token_ids[window_start:window_end]
-
-                model_inputs = hf_tok.prepare_for_model(
-                    window_ids,
-                    add_special_tokens=True,
-                    return_attention_mask=True,
-                )
-
-                input_ids = torch.tensor(
-                    [model_inputs["input_ids"]],
-                    device=device,
-                )
-
-                attention_mask = torch.tensor(
-                    [model_inputs["attention_mask"]],
-                    device=device,
-                )
-
+        with torch.inference_mode():
+            for batch_start in range(0, len(window_starts), batch_size):
+                starts = window_starts[batch_start:batch_start + batch_size]
+                windows = [
+                    token_ids[start:start + window_size]
+                    for start in starts
+                ]
+                model_inputs = [
+                    hf_tok.prepare_for_model(
+                        window,
+                        add_special_tokens=True,
+                        return_attention_mask=True,
+                    )
+                    for window in windows
+                ]
+                input_ids = pad_sequence(
+                    [torch.tensor(item["input_ids"], dtype=torch.long) for item in model_inputs],
+                    batch_first=True,
+                    padding_value=hf_tok.pad_token_id,
+                ).to(device)
+                attention_mask = pad_sequence(
+                    [torch.tensor(item["attention_mask"], dtype=torch.long) for item in model_inputs],
+                    batch_first=True,
+                    padding_value=0,
+                ).to(device)
                 with torch.autocast(
                     device_type=device_type,
                     dtype=self.config.dtype,
@@ -260,28 +261,21 @@ class TokenizerModel(BorgBaseModel):
                     logits = self(
                         input_ids,
                         attention_mask,
-                    ).squeeze(0)
+                    ).float().cpu()
 
-                logits = logits.cpu()
+                for row, (start, window) in enumerate(zip(starts, windows)):
+                    special_mask = hf_tok.get_special_tokens_mask(
+                        window,
+                        already_has_special_tokens=False,
+                    )
+                    content_positions = [
+                        index for index, is_special in enumerate(special_mask)
+                        if not is_special
+                    ]
+                    score_sums[start:start + len(window)] += logits[row, content_positions]
+                    score_counts[start:start + len(window)] += 1
 
-                special_mask = hf_tok.get_special_tokens_mask(
-                    window_ids,
-                    already_has_special_tokens=False,
-                )
-
-                content_index = window_start
-
-                for model_index, is_special in enumerate(
-                    special_mask
-                ):
-                    if not is_special:
-                        score_sums[content_index] += logits[model_index]
-                        score_counts[content_index] += 1
-                        content_index += 1
-
-        preds = (
-            score_sums / score_counts.unsqueeze(1)
-        ).argmax(-1).tolist()
+        preds = (score_sums / score_counts.unsqueeze(1)).argmax(-1).tolist()
 
         sentences: List[Sentence] = []
         current_sentence: Optional[Sentence] = None
