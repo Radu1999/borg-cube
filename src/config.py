@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List
 
+import torch
+
 
 @dataclass
 class BorgConfig:
@@ -12,10 +14,11 @@ class BorgConfig:
     batch_size: int = 16
     learning_rate: float = 2e-4
     num_epochs: int = 10
-    warmup_ratio: float = 0.1
+    warmup_ratio: float = 0
     adapter_reduction_factor: int = 16
     seed: int = 42
     lang: str = "en"
+    dtype: torch.dtype = torch.bfloat16
     device: str = "auto"  # "auto", "cpu", "cuda"
     components: List[str] = field(
         default_factory=lambda: ["tokenizer", "tagger", "parser", "lemmatizer"]
@@ -24,6 +27,5 @@ class BorgConfig:
 
     def resolve_device(self) -> str:
         if self.device == "auto":
-            import torch
             return "cuda" if torch.cuda.is_available() else "cpu"
         return self.device

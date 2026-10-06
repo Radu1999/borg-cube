@@ -23,7 +23,11 @@ class BorgBaseModel(nn.Module):
         import adapters
 
         self.hf_tokenizer = AutoTokenizer.from_pretrained(config.model_name)
-        self.encoder = AutoModel.from_pretrained(config.model_name)
+        self.encoder = AutoModel.from_pretrained(
+            config.model_name,
+            torch_dtype=torch.bfloat16,
+        )
+        
         adapters.init(self.encoder)
         pfeiffer_cfg = adapters.SeqBnConfig(reduction_factor=6)
         self.encoder.add_adapter(component, config=pfeiffer_cfg)

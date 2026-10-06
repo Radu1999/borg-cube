@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
-
+from torch.nn.utils.rnn import pad_sequence
 from src.data.conllu import Sentence, Token
 
 
@@ -117,7 +117,7 @@ class TokenizerDataset(Dataset):
             return_offsets_mapping=True,
             max_length=self.max_length,
             truncation=True,
-            padding="max_length",
+            padding=False,
             return_tensors="pt",
         )
         offset_mapping = encoding.pop("offset_mapping").squeeze(0)  # (seq_len, 2)
@@ -252,9 +252,28 @@ class ParserDataset(Dataset):
         all_deprels = [t.deprel for s in sentences for t in s.regular_tokens()]
         self.deprel_vocab = deprel_vocab or _build_vocab(all_deprels)
         self.sentences = sentences
+        self.hf_tok.padding_side = "right"
 
     def __len__(self) -> int:
         return len(self.sentences)
+
+    def collate_fn(self, batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+        """Right-pad parser examples to the longest sequence in this batch."""
+        padding_values = {
+            "input_ids": self.hf_tok.pad_token_id,
+            "attention_mask": 0,
+            "head_labels": -100,
+            "deprel_labels": -100,
+        }
+        return {
+            key: pad_sequence(
+                [example[key] for example in batch],
+                batch_first=True,
+                padding_value=padding_value,
+            )
+            for key, padding_value in padding_values.items()
+        }
+
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sent = self.sentences[idx]
@@ -266,7 +285,7 @@ class ParserDataset(Dataset):
             is_split_into_words=True,
             max_length=self.max_length,
             truncation=True,
-            padding="max_length",
+            padding=False,
             return_tensors="pt",
         )
         input_ids = encoding["input_ids"].squeeze(0)
