@@ -62,7 +62,7 @@ class BorgBaseModel(nn.Module):
         if extras:
             torch.save(extras, os.path.join(path, "extras.pt"))
         # Save config
-        cfg_dict = {k: v for k, v in self.config.__dict__.items()}
+        cfg_dict = self.config.to_dict()
         cfg_dict["component"] = self.component
         with open(os.path.join(path, "borg_config.json"), "w") as f:
             json.dump(cfg_dict, f, indent=2)
@@ -74,7 +74,7 @@ class BorgBaseModel(nn.Module):
             cfg_dict = json.load(f)
         component = cfg_dict.pop("component")
         if config is None:
-            config = BorgConfig(**{k: v for k, v in cfg_dict.items() if k in BorgConfig.__dataclass_fields__})
+            config = BorgConfig.from_dict(cfg_dict)
 
         obj = cls.__new__(cls)
         BorgBaseModel.__init__(obj, config, component)

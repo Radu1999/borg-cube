@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import Any, Dict, List, Mapping
 
 import torch
 
@@ -24,6 +24,26 @@ class BorgConfig:
         default_factory=lambda: ["tokenizer", "tagger", "parser", "lemmatizer"]
     )
     eval_batch_size: int = 32
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return checkpoint metadata with a JSON-compatible dtype."""
+        values = dict(self.__dict__)
+        values["dtype"] = str(self.dtype)
+        return values
+
+    @classmethod
+    def from_dict(cls, values: Mapping[str, Any]) -> "BorgConfig":
+        """Restore checkpoint metadata, including its PyTorch dtype."""
+        fields = {k: v for k, v in values.items() if k in cls.__dataclass_fields__}
+        if "dtype" in fields:
+            dtype = fields["dtype"]
+            if isinstance(dtype, str):
+                name = dtype[len("torch."):] if dtype.startswith("torch.") else dtype
+                dtype = getattr(torch, name, None)
+            if not isinstance(dtype, torch.dtype):
+                raise ValueError(f"Invalid checkpoint dtype: {fields['dtype']!r}")
+            fields["dtype"] = dtype
+        return cls(**fields)
 
     def resolve_device(self) -> str:
         if self.device == "auto":

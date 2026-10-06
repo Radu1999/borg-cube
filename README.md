@@ -1,6 +1,14 @@
 # borg-cube
 Repository for the borg-cube nlp processing framework
 
+## Checkpoints
+
+Training saves the latest and best models in the `last/` and `best/`
+subdirectories of the component's model directory. Checkpoint configuration
+stores `BorgConfig.dtype` as a string (for example, `"torch.bfloat16"`) and
+restores it to a PyTorch dtype when loading. Checkpoints without a dtype field
+use the default `torch.bfloat16`; invalid dtype names raise an error.
+
 ## Inference
 
 All four models use `BorgConfig.eval_batch_size` (default: 32) for prediction.
