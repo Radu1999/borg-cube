@@ -268,3 +268,35 @@ def test_tokenizer_batches_windows_and_preserves_overlap_predictions():
     batched.config.eval_batch_size = 0
     with pytest.raises(ValueError, match="eval_batch_size"):
         batched.predict(text)
+
+
+@pytest.mark.parametrize("model_type", [TaggerModel, LemmatizerModel, ParserModel])
+def test_sentence_prediction_progress_is_batch_based_and_optional(monkeypatch, model_type):
+    progress = Mock(side_effect=lambda iterable, **kwargs: iterable)
+    monkeypatch.setattr("src.models.inference.tqdm", progress)
+    model = make_model(model_type, 3)
+    inputs = sentences()
+    visible = model.predict(inputs)
+    assert len(progress.call_args.args[0]) == 2
+    assert progress.call_args.kwargs["unit"] == "batch"
+    assert progress.call_args.kwargs["disable"] is False
+    assert progress.call_args.kwargs["desc"] == f"[{model_type.__name__}] Predict"
+    assert model.predict(inputs, show_progress=False) == visible
+    assert progress.call_args.kwargs["disable"] is True
+    assert model.predict([]) == []
+    assert progress.call_args.kwargs["disable"] is True
+
+
+def test_tokenizer_prediction_progress_is_batch_based_and_optional(monkeypatch):
+    progress = Mock(side_effect=lambda iterable, **kwargs: iterable)
+    monkeypatch.setattr("src.models.tokenizer.tqdm", progress)
+    model = make_tokenizer(3)
+    text = "A B C D E F G H I J"
+    visible = model.predict(text)
+    assert len(progress.call_args.args[0]) == 3
+    assert progress.call_args.kwargs["unit"] == "batch"
+    assert progress.call_args.kwargs["disable"] is False
+    assert model.predict(text, show_progress=False) == visible
+    assert progress.call_args.kwargs["disable"] is True
+    assert model.predict("") == []
+    assert progress.call_args.kwargs["disable"] is True

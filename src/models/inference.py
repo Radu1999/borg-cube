@@ -6,6 +6,7 @@ from typing import Iterator, List, Dict
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
+from tqdm import tqdm
 
 from src.data.conllu import Sentence, Token
 from src.models.base import BorgBaseModel
@@ -24,6 +25,8 @@ class SentenceBatch:
 def sentence_batches(
     model: BorgBaseModel,
     sentences: List[Sentence],
+    *,
+    show_progress: bool = False,
 ) -> Iterator[SentenceBatch]:
     batch_size = model.config.eval_batch_size
     if batch_size < 1:
@@ -37,7 +40,12 @@ def sentence_batches(
         (example for example in examples if example[1]),
         key=lambda example: sum(len(token.form) for token in example[1]),
     )
-    for start in range(0, len(examples), batch_size):
+    for start in tqdm(
+        range(0, len(examples), batch_size),
+        desc=f"[{type(model).__name__}] Predict",
+        unit="batch",
+        disable=not show_progress or not examples,
+    ):
         chunk = examples[start:start + batch_size]
         encoding = model.hf_tokenizer(
             [[token.form for token in tokens] for _, tokens in chunk],

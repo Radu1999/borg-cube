@@ -184,7 +184,7 @@ class TokenizerModel(BorgBaseModel):
         return model
 
     # ------------------------------------------------------------------
-    def predict(self, text: str) -> List[Sentence]:
+    def predict(self, text: str, *, show_progress: bool = True) -> List[Sentence]:
         """Segment *text* into sentences and tokens, preserving whitespace."""
         device = self.config.resolve_device()
         device_type = torch.device(device).type
@@ -229,7 +229,12 @@ class TokenizerModel(BorgBaseModel):
         window_starts = range(0, len(token_ids), window_step)
 
         with torch.inference_mode():
-            for batch_start in range(0, len(window_starts), batch_size):
+            for batch_start in tqdm(
+                range(0, len(window_starts), batch_size),
+                desc="[TokenizerModel] Predict",
+                unit="batch",
+                disable=not show_progress or not token_ids,
+            ):
                 starts = window_starts[batch_start:batch_start + batch_size]
                 windows = [
                     token_ids[start:start + window_size]

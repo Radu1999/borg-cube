@@ -632,6 +632,8 @@ class ParserModel(BorgBaseModel):
     def predict(
         self,
         sentences: List[Sentence],
+        *,
+        show_progress: bool = True,
     ) -> List[Sentence]:
         device = self.config.resolve_device()
         device_type = torch.device(device).type
@@ -645,7 +647,7 @@ class ParserModel(BorgBaseModel):
         }
 
         results = list(sentences)
-        for batch in sentence_batches(self, sentences):
+        for batch in sentence_batches(self, sentences, show_progress=show_progress):
             with torch.inference_mode(), torch.autocast(
                 device_type=device_type,
                 dtype=self.config.dtype,

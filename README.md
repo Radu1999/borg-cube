@@ -10,6 +10,11 @@ Returned sentences remain in input order, and empty sentences are preserved.
 The tokenizer batches overlapping windows without changing whitespace
 reconstruction or overlap scoring.
 
+Each model's `predict()` displays a tqdm progress bar measured in batches.
+Pass `show_progress=False` to disable it, for example
+`tagger.predict(sentences, show_progress=False)` or
+`tokenizer.predict(text, show_progress=False)`. Empty input produces no bar.
+
 Prediction uses PyTorch inference mode and the configured CUDA autocast dtype.
 The parser scores dependency relations only for decoded arcs instead of
 materializing a relation tensor for every subword pair. Training is unchanged.
