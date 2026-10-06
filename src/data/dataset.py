@@ -56,6 +56,23 @@ class TokenizerDataset(Dataset):
         # out of CoNLL-U sentences.
         self.examples: List[Tuple[str, List[int]]] = []
         self._build_examples(sentences)
+    
+    def collate_fn(self, batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+        """Right-pad parser examples to the longest sequence in this batch."""
+        padding_values = {
+            "input_ids": self.hf_tok.pad_token_id,
+            "attention_mask": 0,
+            "head_labels": -100,
+            "deprel_labels": -100,
+        }
+        return {
+            key: pad_sequence(
+                [example[key] for example in batch],
+                batch_first=True,
+                padding_value=padding_value,
+            )
+            for key, padding_value in padding_values.items()
+        }
 
     def _build_examples(self, sentences: List[Sentence]) -> None:
         # We group sentences into chunks that fit within max_length.
@@ -187,6 +204,23 @@ class TaggerDataset(Dataset):
 
     def __len__(self) -> int:
         return len(self.sentences)
+    
+    def collate_fn(self, batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+        """Right-pad parser examples to the longest sequence in this batch."""
+        padding_values = {
+            "input_ids": self.hf_tok.pad_token_id,
+            "attention_mask": 0,
+            "head_labels": -100,
+            "deprel_labels": -100,
+        }
+        return {
+            key: pad_sequence(
+                [example[key] for example in batch],
+                batch_first=True,
+                padding_value=padding_value,
+            )
+            for key, padding_value in padding_values.items()
+        }
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sent = self.sentences[idx]
@@ -413,6 +447,23 @@ class LemmatizerDataset(Dataset):
 
     def __len__(self) -> int:
         return len(self.sentences)
+    
+    def collate_fn(self, batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+        """Right-pad parser examples to the longest sequence in this batch."""
+        padding_values = {
+            "input_ids": self.hf_tok.pad_token_id,
+            "attention_mask": 0,
+            "head_labels": -100,
+            "deprel_labels": -100,
+        }
+        return {
+            key: pad_sequence(
+                [example[key] for example in batch],
+                batch_first=True,
+                padding_value=padding_value,
+            )
+            for key, padding_value in padding_values.items()
+        }
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sent = self.sentences[idx]
