@@ -2,8 +2,12 @@
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 
-from src.models.checkpoints import save_training_models
+import torch
+from torch.utils.data import DataLoader
+
+from src.models.checkpoints import TrainingState, save_training_models
 
 
 class _FakeModel:
@@ -14,6 +18,36 @@ class _FakeModel:
 
 
 class TestTrainingCheckpoints(unittest.TestCase):
+
+    def test_restores_optimizer_scheduler_counters_and_rng(self):
+        model = _FakeModel()
+        model.config = SimpleNamespace(seed=42)
+        model.score = 0.7
+        parameter = torch.nn.Parameter(torch.ones(1))
+        optimizer = torch.optim.AdamW([parameter], lr=0.1)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1)
+        loader = DataLoader(torch.arange(4), batch_size=2, shuffle=True)
+        with tempfile.TemporaryDirectory() as path:
+            state = TrainingState(model, path, optimizer, scheduler, loader)
+            parameter.sum().backward()
+            optimizer.step()
+            scheduler.step()
+            state.step(0.5)
+            state.finish_epoch(0.7)
+            expected_random = torch.rand(3)
+            restored_optimizer = torch.optim.AdamW([parameter], lr=9.0)
+            restored_scheduler = torch.optim.lr_scheduler.StepLR(restored_optimizer, 1)
+            restored = TrainingState(
+                model, path, restored_optimizer, restored_scheduler, loader, resume=True,
+            )
+            self.assertEqual(restored.epoch, 1)
+            self.assertEqual(restored.batch, 0)
+            self.assertEqual(restored.global_step, 1)
+            self.assertEqual(restored.best_score, 0.7)
+            self.assertEqual(restored_optimizer.param_groups[0]["lr"], optimizer.param_groups[0]["lr"])
+            self.assertEqual(restored_scheduler.state_dict(), scheduler.state_dict())
+            self.assertEqual(restored_optimizer.state[parameter]["step"].item(), 1)
+            torch.testing.assert_close(torch.rand(3), expected_random)
 
     def test_retains_last_and_best_only(self):
         model = _FakeModel()
