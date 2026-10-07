@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -14,7 +15,12 @@ from src.config import BorgConfig
 from src.data.conllu import Sentence, Token
 from src.data.dataset import TaggerDataset, _build_vocab, _feats_to_str
 from src.models.base import BorgBaseModel
-from src.models.evaluation import average_f1, evaluate_predictions, print_validation_metrics
+from src.models.inference import sentence_batches
+from src.models.evaluation import (
+    average_f1,
+    evaluate_predictions,
+    print_validation_metrics,
+)
 from src.models.checkpoints import save_training_models
 
 
@@ -35,15 +41,31 @@ class TaggerModel(BorgBaseModel):
         self._build_heads()
 
     def _build_heads(self) -> None:
-        self.upos_head = nn.Linear(self.hidden_size, len(self.upos_vocab))
-        self.xpos_head = nn.Linear(self.hidden_size, len(self.xpos_vocab))
-        self.feats_head = nn.Linear(self.hidden_size, len(self.feats_vocab))
+        self.upos_head = nn.Linear(
+            self.hidden_size,
+            len(self.upos_vocab),
+        )
+        self.xpos_head = nn.Linear(
+            self.hidden_size,
+            len(self.xpos_vocab),
+        )
+        self.feats_head = nn.Linear(
+            self.hidden_size,
+            len(self.feats_vocab),
+        )
 
     def forward(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
     ) -> tuple:
         hidden = self.encode(input_ids, attention_mask)  # (B, L, H)
-        return self.upos_head(hidden), self.xpos_head(hidden), self.feats_head(hidden)
+
+        return (
+            self.upos_head(hidden),
+            self.xpos_head(hidden),
+            self.feats_head(hidden),
+        )
 
     # ------------------------------------------------------------------
     def _get_extras(self) -> Dict[str, Any]:
@@ -60,7 +82,9 @@ class TaggerModel(BorgBaseModel):
         self.upos_vocab = extras["upos_vocab"]
         self.xpos_vocab = extras["xpos_vocab"]
         self.feats_vocab = extras["feats_vocab"]
+
         self._build_heads()
+
         self.upos_head.load_state_dict(extras["upos_head"])
         self.xpos_head.load_state_dict(extras["xpos_head"])
         self.feats_head.load_state_dict(extras["feats_head"])
@@ -74,37 +98,81 @@ class TaggerModel(BorgBaseModel):
         model_path: str,
     ) -> "TaggerModel":
         device = config.resolve_device()
+        device_type = torch.device(device).type
+
         torch.manual_seed(config.seed)
 
-        # Build vocabularies from training data
-        all_upos = [t.upos for s in train_sentences for t in s.regular_tokens()]
-        all_xpos = [t.xpos for s in train_sentences for t in s.regular_tokens()]
-        all_feats = [_feats_to_str(t) for s in train_sentences for t in s.regular_tokens()]
+        # Build vocabularies from training data.
+        all_upos = [
+            t.upos
+            for s in train_sentences
+            for t in s.regular_tokens()
+        ]
+        all_xpos = [
+            t.xpos
+            for s in train_sentences
+            for t in s.regular_tokens()
+        ]
+        all_feats = [
+            _feats_to_str(t)
+            for s in train_sentences
+            for t in s.regular_tokens()
+        ]
+
         upos_vocab = _build_vocab(all_upos)
         xpos_vocab = _build_vocab(all_xpos)
         feats_vocab = _build_vocab(all_feats)
 
-        model = TaggerModel(config, upos_vocab, xpos_vocab, feats_vocab).to(device)
+        model = TaggerModel(
+            config,
+            upos_vocab,
+            xpos_vocab,
+            feats_vocab,
+        ).to(device)
 
         train_ds = TaggerDataset(
-            train_sentences, config.model_name, config.max_seq_length,
-            upos_vocab, xpos_vocab, feats_vocab,
+            train_sentences,
+            config.model_name,
+            config.max_seq_length,
+            upos_vocab,
+            xpos_vocab,
+            feats_vocab,
         )
-        train_loader = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True)
 
-        optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=config.batch_size,
+            shuffle=True,
+            collate_fn=train_ds.collate_fn,
+        )
+
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=config.learning_rate,
+        )
+
         total_steps = len(train_loader) * config.num_epochs
         warmup_steps = int(total_steps * config.warmup_ratio)
-        scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, total_steps)
+
+        scheduler = get_linear_schedule_with_warmup(
+            optimizer,
+            warmup_steps,
+            total_steps,
+        )
+
         loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
-        inv_upos = {v: k for k, v in upos_vocab.items()}
         best_score = -1.0
 
         for epoch in range(config.num_epochs):
             model.train()
             total_loss = 0.0
-            progress = tqdm(train_loader, desc=f"[Tagger] Epoch {epoch + 1}")
+
+            progress = tqdm(
+                train_loader,
+                desc=f"[Tagger] Epoch {epoch + 1}",
+            )
+
             for batch in progress:
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
@@ -112,17 +180,51 @@ class TaggerModel(BorgBaseModel):
                 xpos_lbl = batch["xpos_labels"].to(device)
                 feats_lbl = batch["feats_labels"].to(device)
 
-                u_logits, x_logits, f_logits = model(input_ids, attention_mask)
-                upos_loss = loss_fn(u_logits.view(-1, len(upos_vocab)), upos_lbl.view(-1))
-                xpos_loss = loss_fn(x_logits.view(-1, len(xpos_vocab)), xpos_lbl.view(-1))
-                feats_loss = loss_fn(f_logits.view(-1, len(feats_vocab)), feats_lbl.view(-1))
-                loss = upos_loss + xpos_loss + feats_loss
                 optimizer.zero_grad()
+
+                with torch.autocast(
+                    device_type=device_type,
+                    dtype=config.dtype,
+                    enabled=device_type == "cuda",
+                ):
+                    u_logits, x_logits, f_logits = model(
+                        input_ids,
+                        attention_mask,
+                    )
+
+                    upos_loss = loss_fn(
+                        u_logits.view(-1, len(upos_vocab)),
+                        upos_lbl.view(-1),
+                    )
+
+                    xpos_loss = loss_fn(
+                        x_logits.view(-1, len(xpos_vocab)),
+                        xpos_lbl.view(-1),
+                    )
+
+                    feats_loss = loss_fn(
+                        f_logits.view(-1, len(feats_vocab)),
+                        feats_lbl.view(-1),
+                    )
+
+                    loss = (
+                        upos_loss
+                        + xpos_loss
+                        + feats_loss
+                    )
+
                 loss.backward()
-                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+                nn.utils.clip_grad_norm_(
+                    model.parameters(),
+                    1.0,
+                )
+
                 optimizer.step()
                 scheduler.step()
+
                 total_loss += loss.item()
+
                 progress.set_postfix(
                     loss=f"{loss.item():.4f}",
                     upos_loss=f"{upos_loss.item():.4f}",
@@ -134,75 +236,88 @@ class TaggerModel(BorgBaseModel):
 
             avg_loss = total_loss / len(train_loader)
 
-            metrics = evaluate_predictions(dev_sentences, model.predict(dev_sentences))
+            metrics = evaluate_predictions(
+                dev_sentences,
+                model.predict(dev_sentences),
+            )
+
             print(f"  loss={avg_loss:.4f}")
-            print_validation_metrics(metrics, ["UPOS", "XPOS", "FEATS"])
-            score = average_f1(metrics, ["UPOS", "XPOS", "FEATS"])
-            best_score = save_training_models(model, model_path, score, best_score)
+
+            print_validation_metrics(
+                metrics,
+                ["UPOS", "XPOS", "FEATS"],
+            )
+
+            score = average_f1(
+                metrics,
+                ["UPOS", "XPOS", "FEATS"],
+            )
+
+            best_score = save_training_models(
+                model,
+                model_path,
+                score,
+                best_score,
+            )
 
         return model
 
     # ------------------------------------------------------------------
-    def predict(self, sentences: List[Sentence]) -> List[Sentence]:
+    def predict(
+        self,
+        sentences: List[Sentence],
+        *,
+        show_progress: bool = True,
+    ) -> List[Sentence]:
         device = self.config.resolve_device()
+        device_type = torch.device(device).type
+
         self.eval()
         self.to(device)
 
-        inv_upos = {v: k for k, v in self.upos_vocab.items()}
-        inv_xpos = {v: k for k, v in self.xpos_vocab.items()}
-        inv_feats = {v: k for k, v in self.feats_vocab.items()}
+        inv_upos = {
+            v: k for k, v in self.upos_vocab.items()
+        }
+        inv_xpos = {
+            v: k for k, v in self.xpos_vocab.items()
+        }
+        inv_feats = {
+            v: k for k, v in self.feats_vocab.items()
+        }
 
-        results: List[Sentence] = []
-        hf_tok = self.hf_tokenizer
-
-        for sent in sentences:
-            tokens = sent.regular_tokens()
-            if not tokens:
-                results.append(sent)
-                continue
-            forms = [t.form for t in tokens]
-
-            encoding = hf_tok(
-                forms,
-                is_split_into_words=True,
-                max_length=self.config.max_seq_length,
-                truncation=True,
-                return_tensors="pt",
-            )
-            word_ids = encoding.word_ids(batch_index=0)
-            input_ids = encoding["input_ids"].to(device)
-            attention_mask = encoding["attention_mask"].to(device)
-
-            with torch.no_grad():
-                u_logits, x_logits, f_logits = self(input_ids, attention_mask)
-
-            u_preds = u_logits.squeeze(0).argmax(-1).cpu().tolist()
-            x_preds = x_logits.squeeze(0).argmax(-1).cpu().tolist()
-            f_preds = f_logits.squeeze(0).argmax(-1).cpu().tolist()
-
-            word_to_pos: Dict[int, tuple] = {}
-            for i, wid in enumerate(word_ids):
-                if wid is None or wid in word_to_pos:
-                    continue
-                word_to_pos[wid] = (
-                    inv_upos.get(u_preds[i], "_"),
-                    inv_xpos.get(x_preds[i], "_"),
-                    inv_feats.get(f_preds[i], "_"),
+        results = list(sentences)
+        for batch in sentence_batches(self, sentences, show_progress=show_progress):
+            with torch.inference_mode(), torch.autocast(
+                device_type=device_type,
+                dtype=self.config.dtype,
+                enabled=device_type == "cuda",
+            ):
+                u_logits, x_logits, f_logits = self(
+                    batch.input_ids.to(device),
+                    batch.attention_mask.to(device),
                 )
+                predictions = torch.stack(
+                    [u_logits.argmax(-1), x_logits.argmax(-1), f_logits.argmax(-1)],
+                    dim=-1,
+                ).cpu().tolist()
 
-            new_sent = Sentence(comments=sent.comments)
-            for tok in sent.tokens:
-                if tok.is_multiword() or tok.is_empty():
-                    new_sent.tokens.append(tok)
-                    continue
-                tid = tok.id - 1  # 0-based index
-                upos, xpos, feats_str = word_to_pos.get(tid, ("_", "_", "_"))
-                new_tok = Token(
-                    id=tok.id, form=tok.form, lemma=tok.lemma,
-                    upos=upos, xpos=xpos, feats=feats_str,
-                    head=tok.head, deprel=tok.deprel, deps=tok.deps, misc=tok.misc,
-                )
-                new_sent.tokens.append(new_tok)
-            results.append(new_sent)
+            for row, index in enumerate(batch.indices):
+                sent = sentences[index]
+                word_tags = {
+                    wid: (
+                        inv_upos.get(predictions[row][pos][0], "_"),
+                        inv_xpos.get(predictions[row][pos][1], "_"),
+                        inv_feats.get(predictions[row][pos][2], "_"),
+                    )
+                    for wid, pos in batch.word_positions[row].items()
+                }
+                new_sent = Sentence(comments=sent.comments)
+                for tok in sent.tokens:
+                    if tok.is_multiword() or tok.is_empty():
+                        new_sent.tokens.append(tok)
+                        continue
+                    upos, xpos, feats = word_tags.get(tok.id - 1, ("_", "_", "_"))
+                    new_sent.tokens.append(replace(tok, upos=upos, xpos=xpos, feats=feats))
+                results[index] = new_sent
 
         return results
