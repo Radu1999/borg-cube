@@ -21,7 +21,7 @@ from src.models.evaluation import (
     evaluate_predictions,
     print_validation_metrics,
 )
-from src.models.checkpoints import save_training_models
+from src.models.checkpoints import TrainingState
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +424,8 @@ class ParserModel(BorgBaseModel):
         dev_sentences: List[Sentence],
         config: BorgConfig,
         model_path: str,
+        *,
+        resume: bool = False,
     ) -> "ParserModel":
         device = config.resolve_device()
         device_type = torch.device(device).type
@@ -437,10 +439,14 @@ class ParserModel(BorgBaseModel):
         ]
         deprel_vocab = _build_vocab(all_deprels)
 
-        model = ParserModel(
-            config,
-            deprel_vocab,
-        ).to(device)
+        if resume:
+            model = ParserModel.load(os.path.join(model_path, "last"), config).to(device)
+            deprel_vocab = model.deprel_vocab
+        else:
+            model = ParserModel(
+                config,
+                deprel_vocab,
+            ).to(device)
 
         train_ds = ParserDataset(
             train_sentences,
@@ -484,147 +490,135 @@ class ParserModel(BorgBaseModel):
             ignore_index=-100
         )
 
-        best_score = -1.0
+        with TrainingState(
+            model, model_path, optimizer, scheduler, train_loader, resume=resume,
+        ) as state:
+            for epoch in range(state.epoch, config.num_epochs):
+                model.train()
+                progress = state.progress(epoch, "Parser")
 
-        for epoch in range(config.num_epochs):
-            model.train()
-            total_loss = 0.0
+                for batch in progress:
+                    input_ids = batch["input_ids"].to(device)
+                    attention_mask = batch[
+                        "attention_mask"
+                    ].to(device)
+                    head_labels = batch[
+                        "head_labels"
+                    ].to(device)
+                    deprel_labels = batch[
+                        "deprel_labels"
+                    ].to(device)
 
-            progress = tqdm(
-                train_loader,
-                desc=f"[Parser] Epoch {epoch + 1}",
-            )
-
-            for batch in progress:
-                input_ids = batch["input_ids"].to(device)
-                attention_mask = batch[
-                    "attention_mask"
-                ].to(device)
-                head_labels = batch[
-                    "head_labels"
-                ].to(device)
-                deprel_labels = batch[
-                    "deprel_labels"
-                ].to(device)
-
-                optimizer.zero_grad(
-                    set_to_none=True
-                )
-
-                with torch.autocast(
-                    device_type=device_type,
-                    dtype=config.dtype,
-                    enabled=device_type == "cuda",
-                ):
-                    arc_scores, rel_scores = model(
-                        input_ids,
-                        attention_mask,
+                    optimizer.zero_grad(
+                        set_to_none=True
                     )
 
-                    batch_size, seq_length, _ = (
-                        arc_scores.shape
-                    )
-
-                    arc_loss = arc_loss_fn(
-                        arc_scores.reshape(
-                            batch_size * seq_length,
-                            seq_length,
-                        ),
-                        head_labels.reshape(
-                            batch_size * seq_length
-                        ),
-                    )
-
-                    head_idx = head_labels.clamp(
-                        min=0
-                    )
-
-                    head_expand = (
-                        head_idx
-                        .unsqueeze(-1)
-                        .unsqueeze(-1)
-                        .expand(
-                            batch_size,
-                            seq_length,
-                            1,
-                            rel_scores.size(-1),
+                    with torch.autocast(
+                        device_type=device_type,
+                        dtype=config.dtype,
+                        enabled=device_type == "cuda",
+                    ):
+                        arc_scores, rel_scores = model(
+                            input_ids,
+                            attention_mask,
                         )
-                    )
 
-                    rel_at_gold = (
-                        rel_scores
-                        .gather(
-                            2,
-                            head_expand,
+                        batch_size, seq_length, _ = (
+                            arc_scores.shape
                         )
-                        .squeeze(2)
+
+                        arc_loss = arc_loss_fn(
+                            arc_scores.reshape(
+                                batch_size * seq_length,
+                                seq_length,
+                            ),
+                            head_labels.reshape(
+                                batch_size * seq_length
+                            ),
+                        )
+
+                        head_idx = head_labels.clamp(
+                            min=0
+                        )
+
+                        head_expand = (
+                            head_idx
+                            .unsqueeze(-1)
+                            .unsqueeze(-1)
+                            .expand(
+                                batch_size,
+                                seq_length,
+                                1,
+                                rel_scores.size(-1),
+                            )
+                        )
+
+                        rel_at_gold = (
+                            rel_scores
+                            .gather(
+                                2,
+                                head_expand,
+                            )
+                            .squeeze(2)
+                        )
+
+                        rel_loss = rel_loss_fn(
+                            rel_at_gold.reshape(
+                                batch_size * seq_length,
+                                -1,
+                            ),
+                            deprel_labels.reshape(
+                                batch_size * seq_length
+                            ),
+                        )
+
+                        loss = arc_loss + rel_loss
+
+                    loss.backward()
+
+                    nn.utils.clip_grad_norm_(
+                        model.parameters(),
+                        1.0,
                     )
 
-                    rel_loss = rel_loss_fn(
-                        rel_at_gold.reshape(
-                            batch_size * seq_length,
-                            -1,
+                    optimizer.step()
+                    scheduler.step()
+
+                    loss_value = loss.item()
+                    state.step(loss_value)
+
+                    progress.set_postfix(
+                        loss=f"{loss_value:.4f}",
+                        arc_loss=f"{arc_loss.item():.4f}",
+                        rel_loss=f"{rel_loss.item():.4f}",
+                        avg_loss=(
+                            f"{state.total_loss / state.batch:.4f}"
                         ),
-                        deprel_labels.reshape(
-                            batch_size * seq_length
+                        lr=(
+                            f"{scheduler.get_last_lr()[0]:.2e}"
                         ),
                     )
 
-                    loss = arc_loss + rel_loss
+                avg_loss = state.total_loss / len(train_loader)
 
-                loss.backward()
-
-                nn.utils.clip_grad_norm_(
-                    model.parameters(),
-                    1.0,
+                metrics = evaluate_predictions(
+                    dev_sentences,
+                    model.predict(dev_sentences),
                 )
 
-                optimizer.step()
-                scheduler.step()
+                print(f"  loss={avg_loss:.4f}")
 
-                loss_value = loss.item()
-                total_loss += loss_value
-
-                progress.set_postfix(
-                    loss=f"{loss_value:.4f}",
-                    arc_loss=f"{arc_loss.item():.4f}",
-                    rel_loss=f"{rel_loss.item():.4f}",
-                    avg_loss=(
-                        f"{total_loss / (progress.n + 1):.4f}"
-                    ),
-                    lr=(
-                        f"{scheduler.get_last_lr()[0]:.2e}"
-                    ),
+                print_validation_metrics(
+                    metrics,
+                    ["UAS", "LAS"],
                 )
 
-            avg_loss = (
-                total_loss
-                / len(train_loader)
-            )
+                score = average_f1(
+                    metrics,
+                    ["UAS", "LAS"],
+                )
 
-            metrics = evaluate_predictions(
-                dev_sentences,
-                model.predict(dev_sentences),
-            )
-
-            print(f"  loss={avg_loss:.4f}")
-
-            print_validation_metrics(
-                metrics,
-                ["UAS", "LAS"],
-            )
-
-            score = average_f1(
-                metrics,
-                ["UAS", "LAS"],
-            )
-
-            best_score = save_training_models(
-                model,
-                model_path,
-                score,
-                best_score,
-            )
+                state.finish_epoch(score)
 
         return model
 

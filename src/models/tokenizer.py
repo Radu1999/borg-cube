@@ -16,7 +16,7 @@ from src.config import BorgConfig
 from src.data.conllu import Sentence, Token
 from src.data.dataset import TokenizerDataset
 from src.models.base import BorgBaseModel
-from src.models.checkpoints import save_training_models
+from src.models.checkpoints import TrainingState
 from src.models.evaluation import (
     average_f1,
     evaluate_predictions,
@@ -63,13 +63,18 @@ class TokenizerModel(BorgBaseModel):
         dev_sentences: List[Sentence],
         config: BorgConfig,
         model_path: str,
+        *,
+        resume: bool = False,
     ) -> "TokenizerModel":
         device = config.resolve_device()
         device_type = torch.device(device).type
 
         torch.manual_seed(config.seed)
 
-        model = TokenizerModel(config).to(device)
+        if resume:
+            model = TokenizerModel.load(os.path.join(model_path, "last"), config).to(device)
+        else:
+            model = TokenizerModel(config).to(device)
 
         train_ds = TokenizerDataset(
             train_sentences,
@@ -100,86 +105,77 @@ class TokenizerModel(BorgBaseModel):
 
         loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
-        best_score = -1.0
+        with TrainingState(
+            model, model_path, optimizer, scheduler, train_loader, resume=resume,
+        ) as state:
+            for epoch in range(state.epoch, config.num_epochs):
+                model.train()
+                progress = state.progress(epoch, "Tokenizer")
 
-        for epoch in range(config.num_epochs):
-            model.train()
-            total_loss = 0.0
+                for batch in progress:
+                    input_ids = batch["input_ids"].to(device)
+                    attention_mask = batch["attention_mask"].to(device)
+                    labels = batch["labels"].to(device)
 
-            progress = tqdm(
-                train_loader,
-                desc=f"[Tokenizer] Epoch {epoch + 1}",
-            )
+                    optimizer.zero_grad()
 
-            for batch in progress:
-                input_ids = batch["input_ids"].to(device)
-                attention_mask = batch["attention_mask"].to(device)
-                labels = batch["labels"].to(device)
+                    with torch.autocast(
+                        device_type=device_type,
+                        dtype=config.dtype,
+                        enabled=device_type == "cuda",
+                    ):
+                        logits = model(
+                            input_ids,
+                            attention_mask,
+                        )  # (B, L, C)
 
-                optimizer.zero_grad()
+                        loss = loss_fn(
+                            logits.view(-1, TokenizerModel.NUM_LABELS),
+                            labels.view(-1),
+                        )
 
-                with torch.autocast(
-                    device_type=device_type,
-                    dtype=config.dtype,
-                    enabled=device_type == "cuda",
-                ):
-                    logits = model(
-                        input_ids,
-                        attention_mask,
-                    )  # (B, L, C)
+                    loss.backward()
 
-                    loss = loss_fn(
-                        logits.view(-1, TokenizerModel.NUM_LABELS),
-                        labels.view(-1),
+                    nn.utils.clip_grad_norm_(
+                        model.parameters(),
+                        1.0,
                     )
 
-                loss.backward()
+                    optimizer.step()
+                    scheduler.step()
 
-                nn.utils.clip_grad_norm_(
-                    model.parameters(),
-                    1.0,
+                    state.step(loss.item())
+
+                    progress.set_postfix(
+                        loss=f"{loss.item():.4f}",
+                        avg_loss=f"{state.total_loss / state.batch:.4f}",
+                        lr=f"{scheduler.get_last_lr()[0]:.2e}",
+                    )
+
+                avg_loss = state.total_loss / len(train_loader)
+
+                predicted_sentences = model.predict(
+                    tokenizer_validation_text(dev_sentences)
                 )
 
-                optimizer.step()
-                scheduler.step()
-
-                total_loss += loss.item()
-
-                progress.set_postfix(
-                    loss=f"{loss.item():.4f}",
-                    avg_loss=f"{total_loss / max(progress.n, 1):.4f}",
-                    lr=f"{scheduler.get_last_lr()[0]:.2e}",
+                metrics = evaluate_predictions(
+                    dev_sentences,
+                    predicted_sentences,
                 )
 
-            avg_loss = total_loss / len(train_loader)
+                print(f"  loss={avg_loss:.4f}")
 
-            predicted_sentences = model.predict(
-                tokenizer_validation_text(dev_sentences)
-            )
+                print_validation_metrics(
+                    metrics,
+                    ["Tokens", "Sentences"],
+                )
 
-            metrics = evaluate_predictions(
-                dev_sentences,
-                predicted_sentences,
-            )
+                score = average_f1(
+                    metrics,
+                    ["Tokens", "Sentences"],
+                )
 
-            print(f"  loss={avg_loss:.4f}")
-
-            print_validation_metrics(
-                metrics,
-                ["Tokens", "Sentences"],
-            )
-
-            score = average_f1(
-                metrics,
-                ["Tokens", "Sentences"],
-            )
-
-            best_score = save_training_models(
-                model,
-                model_path,
-                score,
-                best_score,
-            )
+                state.finish_epoch(score)
 
         return model
 
