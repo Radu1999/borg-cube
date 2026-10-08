@@ -43,27 +43,29 @@ class BorgPipeline:
         train_file: str,
         dev_file: str,
         model_path: str,
+        *,
+        resume: bool = False,
     ) -> None:
-        """Train a component and save it under *model_path/<component>*."""
+        """Train a component, optionally resuming its last checkpoint."""
         train_sentences = read_conllu(train_file)
         dev_sentences = read_conllu(dev_file)
         component_path = os.path.join(model_path, component)
 
         if component == "tokenizer":
             from src.models.tokenizer import TokenizerModel
-            TokenizerModel.train_model(train_sentences, dev_sentences, self.config, component_path)
+            TokenizerModel.train_model(train_sentences, dev_sentences, self.config, component_path, resume=resume)
 
         elif component == "tagger":
             from src.models.tagger import TaggerModel
-            TaggerModel.train_model(train_sentences, dev_sentences, self.config, component_path)
+            TaggerModel.train_model(train_sentences, dev_sentences, self.config, component_path, resume=resume)
 
         elif component == "parser":
             from src.models.parser import ParserModel
-            ParserModel.train_model(train_sentences, dev_sentences, self.config, component_path)
+            ParserModel.train_model(train_sentences, dev_sentences, self.config, component_path, resume=resume)
 
         elif component == "lemmatizer":
             from src.models.lemmatizer import LemmatizerModel
-            LemmatizerModel.train_model(train_sentences, dev_sentences, self.config, component_path)
+            LemmatizerModel.train_model(train_sentences, dev_sentences, self.config, component_path, resume=resume)
 
         else:
             raise ValueError(f"Unknown component: {component}")

@@ -32,6 +32,7 @@ def _build_parser() -> argparse.ArgumentParser:
     train_p.add_argument("train_file", help="Path to CoNLL-U training file")
     train_p.add_argument("dev_file", help="Path to CoNLL-U development file")
     train_p.add_argument("model_file", help="Model folder; the component is saved in its subfolder")
+    train_p.add_argument("--resume", action="store_true", help="Resume from the component's last checkpoint")
 
     # Optional training hyper-parameter overrides
     train_p.add_argument("--epochs", type=int, default=None)
@@ -73,7 +74,10 @@ def _make_config(args: argparse.Namespace) -> BorgConfig:
 def cmd_train(args: argparse.Namespace) -> None:
     config = _make_config(args)
     pipeline = BorgPipeline(config)
-    pipeline.train_component(args.component, args.train_file, args.dev_file, args.model_file)
+    pipeline.train_component(
+        args.component, args.train_file, args.dev_file, args.model_file,
+        resume=args.resume,
+    )
     print(
         f"Saved {args.component} last and best models to "
         f"{args.model_file}/{args.component}/{{last,best}}"
