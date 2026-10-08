@@ -427,6 +427,54 @@ class TestPipelineTrainingPaths(unittest.TestCase):
 
         train_model = tagger_module.TaggerModel.train_model
         self.assertEqual(train_model.call_args.args[3], "/models/ro_rrt/tagger")
+        self.assertEqual(train_model.call_args.kwargs, {"resume": False})
+
+    def test_train_component_forwards_resume_to_all_trainers(self):
+        from src.pipeline.pipeline import BorgPipeline
+
+        for component in ("tokenizer", "tagger", "parser", "lemmatizer"):
+            with self.subTest(component=component):
+                module_name = f"src.models.{component}"
+                module = types.ModuleType(module_name)
+                train_model = MagicMock()
+                setattr(module, f"{component.capitalize()}Model", types.SimpleNamespace(train_model=train_model))
+                pipeline = BorgPipeline()
+                with patch("src.pipeline.pipeline.read_conllu", return_value=[]):
+                    with patch.dict(sys.modules, {module_name: module}):
+                        pipeline.train_component(
+                            component, "train.conllu", "dev.conllu", "/models/ro_rrt",
+                            resume=True,
+                        )
+                train_model.assert_called_once_with(
+                    [], [], pipeline.config, f"/models/ro_rrt/{component}", resume=True,
+                )
+
+
+class TestCLITrainingResume(unittest.TestCase):
+
+    def test_resume_flag_defaults_to_false(self):
+        from borg.cli import _build_parser
+
+        args = _build_parser().parse_args([
+            "train", "--component", "parser", "train.conllu", "dev.conllu", "/models/ro_rrt",
+        ])
+        self.assertFalse(args.resume)
+
+    def test_cli_forwards_resume_flag(self):
+        from borg.cli import main
+
+        for resume in (False, True):
+            with self.subTest(resume=resume):
+                argv = [
+                    "train", "--component", "parser", "train.conllu", "dev.conllu", "/models/ro_rrt",
+                ]
+                if resume:
+                    argv.append("--resume")
+                with patch("borg.cli.BorgPipeline") as pipeline_class, patch("builtins.print"):
+                    main(argv)
+                pipeline_class.return_value.train_component.assert_called_once_with(
+                    "parser", "train.conllu", "dev.conllu", "/models/ro_rrt", resume=resume,
+                )
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,5 @@
 """Tests for retaining latest and best training models."""
+import ast
 import os
 import tempfile
 import unittest
@@ -18,6 +19,37 @@ class _FakeModel:
 
 
 class TestTrainingCheckpoints(unittest.TestCase):
+
+    def test_each_trainer_uses_training_state(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for component in ("tokenizer", "tagger", "parser", "lemmatizer"):
+            with self.subTest(component=component):
+                path = os.path.join(root, "src", "models", f"{component}.py")
+                with open(path, encoding="utf-8") as source:
+                    tree = ast.parse(source.read())
+                training = next(
+                    node for node in ast.walk(tree)
+                    if isinstance(node, ast.FunctionDef) and node.name == "train_model"
+                )
+                contexts = [
+                    item.context_expr
+                    for node in ast.walk(training) if isinstance(node, ast.With)
+                    for item in node.items
+                ]
+                self.assertTrue(any(
+                    isinstance(context, ast.Call)
+                    and isinstance(context.func, ast.Name)
+                    and context.func.id == "TrainingState"
+                    for context in contexts
+                ), f"{component} does not manage training with TrainingState")
+                state_calls = {
+                    node.func.attr for node in ast.walk(training)
+                    if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "state"
+                }
+                self.assertTrue({"progress", "step", "finish_epoch"}.issubset(state_calls))
 
     def test_restores_optimizer_scheduler_counters_and_rng(self):
         model = _FakeModel()

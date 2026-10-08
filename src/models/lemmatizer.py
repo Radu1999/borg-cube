@@ -1,6 +1,7 @@
 """Lemmatizer model: edit-script classification."""
 from __future__ import annotations
 from dataclasses import replace
+import os
 
 from typing import Any, Dict, List, Optional
 
@@ -24,7 +25,7 @@ from src.models.evaluation import (
     evaluate_predictions,
     print_validation_metrics,
 )
-from src.models.checkpoints import save_training_models
+from src.models.checkpoints import TrainingState
 
 
 def _apply_edit_script(form: str, script: str) -> str:
@@ -138,6 +139,8 @@ class LemmatizerModel(BorgBaseModel):
         dev_sentences: List[Sentence],
         config: BorgConfig,
         model_path: str,
+        *,
+        resume: bool = False,
     ) -> "LemmatizerModel":
         device = config.resolve_device()
         device_type = torch.device(device).type
@@ -161,11 +164,16 @@ class LemmatizerModel(BorgBaseModel):
         ]
         script_vocab = _build_vocab(all_scripts)
 
-        model = LemmatizerModel(
-            config,
-            upos_vocab,
-            script_vocab,
-        ).to(device)
+        if resume:
+            model = LemmatizerModel.load(os.path.join(model_path, "last"), config).to(device)
+            upos_vocab = model.upos_vocab
+            script_vocab = model.script_vocab
+        else:
+            model = LemmatizerModel(
+                config,
+                upos_vocab,
+                script_vocab,
+            ).to(device)
 
         train_ds = LemmatizerDataset(
             train_sentences,
@@ -207,105 +215,93 @@ class LemmatizerModel(BorgBaseModel):
             ignore_index=-100
         )
 
-        best_score = -1.0
+        with TrainingState(
+            model, model_path, optimizer, scheduler, train_loader, resume=resume,
+        ) as state:
+            for epoch in range(state.epoch, config.num_epochs):
+                model.train()
+                progress = state.progress(epoch, "Lemmatizer")
 
-        for epoch in range(config.num_epochs):
-            model.train()
-            total_loss = 0.0
+                for batch in progress:
+                    input_ids = batch[
+                        "input_ids"
+                    ].to(device)
 
-            progress = tqdm(
-                train_loader,
-                desc=f"[Lemmatizer] Epoch {epoch + 1}",
-            )
+                    attention_mask = batch[
+                        "attention_mask"
+                    ].to(device)
 
-            for batch in progress:
-                input_ids = batch[
-                    "input_ids"
-                ].to(device)
+                    upos_ids = batch[
+                        "upos_ids"
+                    ].to(device)
 
-                attention_mask = batch[
-                    "attention_mask"
-                ].to(device)
+                    script_labels = batch[
+                        "script_labels"
+                    ].to(device)
 
-                upos_ids = batch[
-                    "upos_ids"
-                ].to(device)
+                    optimizer.zero_grad()
 
-                script_labels = batch[
-                    "script_labels"
-                ].to(device)
+                    with torch.autocast(
+                        device_type=device_type,
+                        dtype=config.dtype,
+                        enabled=device_type == "cuda",
+                    ):
+                        logits = model(
+                            input_ids,
+                            attention_mask,
+                            upos_ids,
+                        )
 
-                optimizer.zero_grad()
+                        loss = loss_fn(
+                            logits.view(
+                                -1,
+                                len(script_vocab),
+                            ),
+                            script_labels.view(-1),
+                        )
 
-                with torch.autocast(
-                    device_type=device_type,
-                    dtype=config.dtype,
-                    enabled=device_type == "cuda",
-                ):
-                    logits = model(
-                        input_ids,
-                        attention_mask,
-                        upos_ids,
+                    loss.backward()
+
+                    nn.utils.clip_grad_norm_(
+                        model.parameters(),
+                        1.0,
                     )
 
-                    loss = loss_fn(
-                        logits.view(
-                            -1,
-                            len(script_vocab),
+                    optimizer.step()
+                    scheduler.step()
+
+                    state.step(loss.item())
+
+                    progress.set_postfix(
+                        loss=f"{loss.item():.4f}",
+                        avg_loss=(
+                            f"{state.total_loss / state.batch:.4f}"
                         ),
-                        script_labels.view(-1),
+                        lr=(
+                            f"{scheduler.get_last_lr()[0]:.2e}"
+                        ),
                     )
 
-                loss.backward()
+                avg_loss = state.total_loss / len(train_loader)
 
-                nn.utils.clip_grad_norm_(
-                    model.parameters(),
-                    1.0,
+                metrics = evaluate_predictions(
+                    dev_sentences,
+                    model.predict(dev_sentences),
                 )
 
-                optimizer.step()
-                scheduler.step()
+                print(f"  loss={avg_loss:.4f}")
 
-                total_loss += loss.item()
-
-                progress.set_postfix(
-                    loss=f"{loss.item():.4f}",
-                    avg_loss=(
-                        f"{total_loss / max(progress.n, 1):.4f}"
-                    ),
-                    lr=(
-                        f"{scheduler.get_last_lr()[0]:.2e}"
-                    ),
+                print_validation_metrics(
+                    metrics,
+                    ["LEMMA"],
                 )
 
-            avg_loss = (
-                total_loss
-                / len(train_loader)
-            )
+                score = average_f1(
+                    metrics,
+                    ["LEMMA"],
+                )
 
-            metrics = evaluate_predictions(
-                dev_sentences,
-                model.predict(dev_sentences),
-            )
-
-            print(f"  loss={avg_loss:.4f}")
-
-            print_validation_metrics(
-                metrics,
-                ["LEMMA"],
-            )
-
-            score = average_f1(
-                metrics,
-                ["LEMMA"],
-            )
-
-            best_score = save_training_models(
-                model,
-                model_path,
-                score,
-                best_score,
-            )
+                state.finish_epoch(score)
 
         return model
 
