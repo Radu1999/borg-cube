@@ -49,6 +49,7 @@ class UDWord:
 class UDSentence:
     words: List[UDWord]
     text: Optional[str]  # sent_text from # text = comment
+    token_forms: Optional[List[str]] = None
 
 
 @dataclass
@@ -79,6 +80,8 @@ def _is_empty(id_str: str) -> bool:
 def _load_conllu(path: str) -> List[UDSentence]:
     sentences: List[UDSentence] = []
     words: List[UDWord] = []
+    token_forms: List[str] = []
+    multiword_end = 0
     sent_text: Optional[str] = None
 
     with open(path, encoding="utf-8") as fh:
@@ -90,16 +93,24 @@ def _load_conllu(path: str) -> List[UDSentence]:
                 continue
             elif line == "":
                 if words:
-                    sentences.append(UDSentence(words=words, text=sent_text))
+                    sentences.append(UDSentence(words=words, text=sent_text, token_forms=token_forms))
                 words = []
+                token_forms = []
+                multiword_end = 0
                 sent_text = None
             else:
                 cols = line.split("\t")
                 if len(cols) != 10:
                     continue
                 id_str = cols[0]
-                if _is_mwt(id_str) or _is_empty(id_str):
+                if _is_empty(id_str):
                     continue
+                if _is_mwt(id_str):
+                    token_forms.append(cols[1])
+                    multiword_end = int(id_str.split("-", 1)[1])
+                    continue
+                if int(id_str) > multiword_end:
+                    token_forms.append(cols[1])
                 head = int(cols[6]) if cols[6] != "_" else 0
                 words.append(UDWord(
                     form=cols[1],
@@ -114,7 +125,7 @@ def _load_conllu(path: str) -> List[UDSentence]:
                 ))
 
     if words:
-        sentences.append(UDSentence(words=words, text=sent_text))
+        sentences.append(UDSentence(words=words, text=sent_text, token_forms=token_forms))
 
     return sentences
 
@@ -141,6 +152,28 @@ def _build_char_sequence(sentences: List[UDSentence]) -> Tuple[str, List[Tuple[i
             spans.append((start, end))
 
     return "".join(chars), spans
+
+
+def _build_surface_sequence(
+    sentences: List[UDSentence],
+) -> Tuple[str, List[Tuple[int, int]], List[Tuple[int, int]]]:
+    """Build surface-token and sentence spans without Unicode Zs spaces."""
+    chars: List[str] = []
+    token_spans: List[Tuple[int, int]] = []
+    sentence_spans: List[Tuple[int, int]] = []
+    for sentence in sentences:
+        start = len(chars)
+        forms = sentence.token_forms
+        if forms is None:
+            forms = [word.form for word in sentence.words]
+        for form in forms:
+            token_start = len(chars)
+            chars.extend(char for char in form if unicodedata.category(char) != "Zs")
+            if len(chars) == token_start:
+                raise ValueError("There is an empty FORM in the CoNLL-U file")
+            token_spans.append((token_start, len(chars)))
+        sentence_spans.append((start, len(chars)))
+    return "".join(chars), token_spans, sentence_spans
 
 
 def _align_spans(
@@ -230,6 +263,11 @@ def evaluate(gold_file: str, system_file: str) -> Dict[str, EvalResult]:
     gold_sents = _load_conllu(gold_file)
     sys_sents = _load_conllu(system_file)
 
+    gold_surface_text, gold_token_spans, gold_sentence_spans = _build_surface_sequence(gold_sents)
+    sys_surface_text, sys_token_spans, sys_sentence_spans = _build_surface_sequence(sys_sents)
+    if gold_surface_text != sys_surface_text:
+        raise ValueError("The concatenation of tokens in gold file and in system file differ!")
+
     gold_text, gold_spans = _build_char_sequence(gold_sents)
     sys_text, sys_spans = _build_char_sequence(sys_sents)
 
@@ -255,8 +293,6 @@ def evaluate(gold_file: str, system_file: str) -> Dict[str, EvalResult]:
         if sys_idx is None:
             continue
         s_word = sys_words[sys_idx]
-
-        counts["Tokens_aligned"] += 1
 
         # UPOS
         if g_word.upos == s_word.upos:
@@ -307,8 +343,6 @@ def evaluate(gold_file: str, system_file: str) -> Dict[str, EvalResult]:
         if _blex_correct(g_word, s_word, heads_match):
             counts["BLEX_correct"] += 1
 
-    aligned = counts["Tokens_aligned"]
-
     def make_result(correct_key: str) -> EvalResult:
         correct = counts.get(correct_key, 0)
         p = correct / max(n_sys, 1)
@@ -322,16 +356,22 @@ def evaluate(gold_file: str, system_file: str) -> Dict[str, EvalResult]:
     # Sentence-level
     n_gold_sent = len(gold_sents)
     n_sys_sent = len(sys_sents)
-    sent_correct = min(n_gold_sent, n_sys_sent)  # basic approximation
+    sys_sentence_span_set = set(sys_sentence_spans)
+    sent_correct = sum(span in sys_sentence_span_set for span in gold_sentence_spans)
+
+    n_gold_tokens = len(gold_token_spans)
+    n_sys_tokens = len(sys_token_spans)
+    sys_token_span_set = set(sys_token_spans)
+    token_correct = sum(span in sys_token_span_set for span in gold_token_spans)
 
     results: Dict[str, EvalResult] = {
         "Tokens": EvalResult(
-            precision=aligned / max(n_sys, 1),
-            recall=aligned / max(n_gold, 1),
-            f1=2 * aligned / max(n_gold + n_sys, 1),
-            aligned_count=aligned,
-            gold_count=n_gold,
-            system_count=n_sys,
+            precision=token_correct / max(n_sys_tokens, 1),
+            recall=token_correct / max(n_gold_tokens, 1),
+            f1=2 * token_correct / max(n_gold_tokens + n_sys_tokens, 1),
+            aligned_count=token_correct,
+            gold_count=n_gold_tokens,
+            system_count=n_sys_tokens,
         ),
         "Sentences": EvalResult(
             precision=sent_correct / max(n_sys_sent, 1),

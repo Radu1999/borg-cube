@@ -85,7 +85,7 @@ class TokenizerDataset(Dataset):
                 labels.clear()
 
         for sent in sentences:
-            tokens = sent.regular_tokens()
+            tokens = sent.surface_tokens()
             if not tokens:
                 continue
             sentence_text = ""

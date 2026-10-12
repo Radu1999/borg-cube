@@ -10,6 +10,7 @@ almost every training example.
 """
 import torch
 
+from src.data.conllu import Sentence, Token
 from src.data.dataset import TokenizerDataset
 
 
@@ -58,6 +59,27 @@ def test_label_alignment_skips_leading_whitespace_in_subword_offset():
     assert labels[3] == -100  # special token
 
 
+def test_training_labels_use_multiword_surface_tokens():
+    sentences = [
+        Sentence(tokens=[
+            Token(id="1-2", form="du", space_after=False),
+            Token(id=1, form="de"),
+            Token(id=2, form="le"),
+            Token(id="2.1", form="empty"),
+            Token(id=3, form="."),
+        ]),
+        Sentence(tokens=[Token(id=1, form="Next")]),
+    ]
+    dataset = TokenizerDataset.__new__(TokenizerDataset)
+    dataset.max_length = 64
+    dataset.examples = []
+
+    dataset._build_examples(sentences)
+
+    assert dataset.examples == [("du. Next ", [2, 0, 1, 0, 2, 0, 0, 0, 0])]
+
+
 if __name__ == "__main__":
     test_label_alignment_skips_leading_whitespace_in_subword_offset()
-    print("Alignment test passed!")
+    test_training_labels_use_multiword_surface_tokens()
+    print("Alignment tests passed!")

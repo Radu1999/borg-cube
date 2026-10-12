@@ -25,7 +25,7 @@ class BorgBaseModel(nn.Module):
         self.hf_tokenizer = AutoTokenizer.from_pretrained(config.model_name)
         self.encoder = AutoModel.from_pretrained(
             config.model_name,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=config.dtype,
         )
         
         adapters.init(self.encoder)

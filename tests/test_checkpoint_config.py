@@ -1,6 +1,7 @@
 """Regression tests for JSON checkpoint configuration and dtype restoration."""
 import json
 import os
+import sys
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
@@ -23,6 +24,21 @@ def _make_model(config, component="parser"):
 
 
 class TestCheckpointConfig(unittest.TestCase):
+    def test_encoder_initialization_uses_configured_dtype(self):
+        transformers = MagicMock()
+        adapters = MagicMock()
+        with patch.dict(sys.modules, {"transformers": transformers, "adapters": adapters}):
+            for component in ("tokenizer", "tagger", "parser", "lemmatizer"):
+                for dtype in (torch.bfloat16, torch.float16, torch.float32, torch.float64):
+                    with self.subTest(component=component, dtype=dtype):
+                        config = BorgConfig(dtype=dtype)
+
+                        BorgBaseModel(config, component)
+
+                        transformers.AutoModel.from_pretrained.assert_called_with(
+                            config.model_name, torch_dtype=dtype
+                        )
+
     def test_json_round_trip_preserves_config_and_dtype(self):
         for dtype in (torch.bfloat16, torch.float16, torch.float32, torch.float64):
             with self.subTest(dtype=dtype):

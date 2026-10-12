@@ -23,12 +23,12 @@ def evaluate_predictions(
 
 
 def tokenizer_validation_text(sentences: Sequence[Sentence]) -> str:
-    """Reconstruct text from gold token forms for tokenizer validation."""
+    """Reconstruct text from gold surface tokens for tokenizer validation."""
     sentence_texts = []
     for sentence in sentences:
         sentence_texts.append("".join(
             token.form + (" " if token.space_after else "")
-            for token in sentence.regular_tokens()
+            for token in sentence.surface_tokens()
         ))
     return "".join(sentence_texts)
 

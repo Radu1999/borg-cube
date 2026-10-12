@@ -287,6 +287,99 @@ class TestEvaluation(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_sentence_score_uses_character_spans(self):
+        from eval.conll18_ud_eval import evaluate
+
+        cases = [
+            ("identical", [["ab"], ["cd"]], [["ab"], ["cd"]], 2),
+            ("shifted", [["ab"], ["cd"]], [["a"], ["bcd"]], 0),
+            ("merged", [["ab"], ["cd"]], [["abcd"]], 0),
+            ("split", [["abcd"]], [["ab"], ["cd"]], 0),
+            ("partial", [["a"], ["b"], ["cd"]], [["a"], ["bcd"]], 1),
+            ("retokenized", [["ab", "cd"], ["e"]], [["a", "bcd"], ["e"]], 2),
+            ("empty", [], [], 0),
+        ]
+        for name, gold_sentences, system_sentences, correct in cases:
+            with self.subTest(name=name):
+                paths = []
+                for sentences in (gold_sentences, system_sentences):
+                    content = "".join(
+                        "".join(
+                            f"{word_id}\t{form}\t_\t_\t_\t_\t"
+                            f"{0 if word_id == 1 else 1}\t_\t_\t_\n"
+                            for word_id, form in enumerate(forms, 1)
+                        ) + "\n"
+                        for forms in sentences
+                    )
+                    path = self._write_tmp(content)
+                    self.addCleanup(os.unlink, path)
+                    paths.append(path)
+
+                result = evaluate(*paths)["Sentences"]
+                gold_count = len(gold_sentences)
+                system_count = len(system_sentences)
+                self.assertEqual(result.aligned_count, correct)
+                self.assertEqual(result.gold_count, gold_count)
+                self.assertEqual(result.system_count, system_count)
+                self.assertAlmostEqual(result.precision, correct / max(system_count, 1))
+                self.assertAlmostEqual(result.recall, correct / max(gold_count, 1))
+                self.assertAlmostEqual(result.f1, 2 * correct / max(gold_count + system_count, 1))
+
+    def test_tokens_score_multiword_surface_spans(self):
+        from eval.conll18_ud_eval import evaluate
+
+        gold = textwrap.dedent("""\
+            1-2\tcannot\t_\t_\t_\t_\t_\t_\t_\t_
+            1\tcan\t_\t_\t_\t_\t0\troot\t_\t_
+            2\tnot\t_\t_\t_\t_\t1\tadvmod\t_\t_
+            2.1\tempty\t_\t_\t_\t_\t_\t_\t_\t_
+            3\t.\t_\t_\t_\t_\t1\tpunct\t_\t_
+
+        """)
+        gold_path = self._write_tmp(gold)
+        self.addCleanup(os.unlink, gold_path)
+        cases = [
+            (["cannot", "."], 2),
+            (["can", "not", "."], 1),
+            (["cannot."], 0),
+        ]
+        for forms, correct in cases:
+            with self.subTest(forms=forms):
+                system = "".join(
+                    f"{word_id}\t{form}\t_\t_\t_\t_\t"
+                    f"{0 if word_id == 1 else 1}\t_\t_\t_\n"
+                    for word_id, form in enumerate(forms, 1)
+                ) + "\n"
+                system_path = self._write_tmp(system)
+                self.addCleanup(os.unlink, system_path)
+
+                metrics = evaluate(gold_path, system_path)
+                result = metrics["Tokens"]
+                self.assertEqual(result.aligned_count, correct)
+                self.assertEqual(result.gold_count, 2)
+                self.assertEqual(result.system_count, len(forms))
+                self.assertAlmostEqual(result.precision, correct / len(forms))
+                self.assertAlmostEqual(result.recall, correct / 2)
+                self.assertAlmostEqual(result.f1, 2 * correct / (2 + len(forms)))
+                self.assertEqual(metrics["Sentences"].f1, 1.0)
+
+    def test_tokens_ignore_unicode_space_separators(self):
+        from eval.conll18_ud_eval import evaluate
+
+        system = "1\tNewYork\t_\t_\t_\t_\t0\troot\t_\t_\n2\t!\t_\t_\t_\t_\t1\tpunct\t_\t_\n\n"
+        system_path = self._write_tmp(system)
+        self.addCleanup(os.unlink, system_path)
+        for form in ("New York", "New\u00a0York", "New\u2009York"):
+            with self.subTest(form=form):
+                gold_path = self._write_tmp(system.replace("NewYork", form))
+                self.addCleanup(os.unlink, gold_path)
+
+                metrics = evaluate(gold_path, system_path)
+
+                self.assertEqual(metrics["Tokens"].aligned_count, 2)
+                self.assertEqual(metrics["Tokens"].f1, 1.0)
+                self.assertEqual(metrics["Sentences"].f1, 1.0)
+
     def test_zero_score_wrong_heads(self):
         from eval.conll18_ud_eval import evaluate
         wrong_conllu = textwrap.dedent("""\
