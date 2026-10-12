@@ -79,6 +79,20 @@ class Sentence:
         """Return only regular (non-MWT, non-empty) tokens."""
         return [t for t in self.tokens if not t.is_multiword() and not t.is_empty()]
 
+    def surface_tokens(self) -> List[Token]:
+        """Return surface tokens, excluding MWT components and empty nodes."""
+        tokens: List[Token] = []
+        multiword_end = 0
+        for token in self.tokens:
+            if token.is_empty():
+                continue
+            if token.is_multiword():
+                multiword_end = int(str(token.id).split("-", 1)[1])
+                tokens.append(token)
+            elif int(token.id) > multiword_end:
+                tokens.append(token)
+        return tokens
+
     def __repr__(self) -> str:
         words = " ".join(t.form for t in self.regular_tokens())
         return f"<Sentence: {words!r}>"

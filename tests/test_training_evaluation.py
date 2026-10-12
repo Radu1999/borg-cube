@@ -44,6 +44,40 @@ class TestTrainingEvaluation(unittest.TestCase):
 
         self.assertEqual(tokenizer_validation_text(sentences), "cannot Next ")
 
+    def test_tokenizer_text_uses_multiword_surface_and_spacing(self):
+        sentences = [
+            Sentence(tokens=[
+                Token(id="1-2", form="du", space_after=False),
+                Token(id=1, form="de"),
+                Token(id=2, form="le"),
+                Token(id="2.1", form="empty"),
+                Token(id=3, form="."),
+            ]),
+            Sentence(tokens=[Token(id=1, form="Next")]),
+        ]
+
+        self.assertEqual(tokenizer_validation_text(sentences), "du. Next ")
+
+    def test_tokenizer_validation_evaluates_multiword_surface_tokens(self):
+        gold = [Sentence(tokens=[
+            Token(id="1-2", form="du"),
+            Token(id=1, form="de"),
+            Token(id=2, form="le"),
+            Token(id=3, form="pain"),
+        ])]
+        text = tokenizer_validation_text(gold)
+        predicted = [Sentence(tokens=[
+            Token(id=word_id, form=form)
+            for word_id, form in enumerate(text.split(), 1)
+        ])]
+
+        metrics = evaluate_predictions(gold, predicted)
+
+        self.assertEqual(metrics["Tokens"].f1, 1.0)
+        self.assertEqual(metrics["Tokens"].gold_count, 2)
+        self.assertEqual(metrics["Tokens"].system_count, 2)
+        self.assertEqual(metrics["Sentences"].f1, 1.0)
+
     def test_prints_only_requested_metrics(self):
         sentence = Sentence(tokens=[Token(id=1, form="word", upos="NOUN")])
         metrics = evaluate_predictions([sentence], [sentence])

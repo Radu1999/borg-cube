@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
@@ -276,143 +276,57 @@ class TokenizerModel(BorgBaseModel):
                     score_sums[start:start + len(window)] += logits[row, content_positions]
                     score_counts[start:start + len(window)] += 1
 
-        preds = (score_sums / score_counts.unsqueeze(1)).argmax(-1).tolist()
+        scores = score_sums / score_counts.unsqueeze(1)
+        character_positions = []
+        subword_indices = []
+        for index, (start, end) in enumerate(offset_mapping):
+            while start < end and text[start].isspace():
+                start += 1
+            if start < end:
+                character_positions.append(start)
+                subword_indices.append(index)
+
+        positions, inverse = torch.unique(
+            torch.tensor(character_positions, dtype=torch.long),
+            sorted=True,
+            return_inverse=True,
+        )
+        character_scores = scores.new_zeros((len(positions), self.NUM_LABELS))
+        character_scores.index_add_(0, inverse, scores[subword_indices])
+        labels = character_scores.argmax(-1).tolist()
+
+        first_character = next(
+            (index for index, char in enumerate(text) if not char.isspace()),
+            None,
+        )
+        if first_character is None:
+            return []
+
+        boundaries = [(first_character, TokenizerDataset.SENTENCE_START)]
+        boundaries.extend(
+            (position, label)
+            for position, label in zip(positions.tolist()[1:], labels[1:])
+            if label != TokenizerDataset.CONTINUATION
+        )
 
         sentences: List[Sentence] = []
-        current_sentence: Optional[Sentence] = None
-        current_form_chars: List[str] = []
-        current_token_id = 1
-
-        # Track the end of the last processed subword to detect whitespace.
-        last_end = 0
-        pending_whitespace = False
-
-        for i, (start, end) in enumerate(offset_mapping):
-            if start == 0 and end == 0:
-                continue  # special token
-
-            label = preds[i]
-            raw_subword = text[start:end]
-
-            # Some tokenizers (e.g. SentencePiece-based ones used by
-            # DeBERTa-v3) include leading whitespace inside the offset span
-            # of a sub-word that starts a new word. Split that whitespace
-            # out so `subword` only holds the actual sub-word content.
-            subword = raw_subword.lstrip()
-
-            leading_ws = raw_subword[
-                : len(raw_subword) - len(subword)
-            ]
-
-            # Detect whitespace before this token/subword: either a gap
-            # between the previous subword and this one, or whitespace
-            # embedded at the start of this subword's own offset span.
-            whitespace_before = (
-                text[last_end:start] + leading_ws
-            )
-
-            if not subword:
-                pending_whitespace = (
-                    pending_whitespace
-                    or bool(whitespace_before)
-                    or raw_subword.isspace()
-                )
-
-                last_end = end
-                continue
-
-            if pending_whitespace:
-                whitespace_before = " " + whitespace_before
-
-            pending_whitespace = False
-
-            if label == TokenizerDataset.SENTENCE_START:
-                # Flush any pending token from the previous sentence.
-                if (
-                    current_form_chars
-                    and current_sentence is not None
-                ):
-                    # The token that just ended has space_after if
-                    # whitespace precedes this new sentence.
-                    has_space = len(whitespace_before) > 0
-
-                    current_sentence.tokens.append(
-                        Token(
-                            id=current_token_id,
-                            form="".join(current_form_chars),
-                            space_after=has_space,
-                        )
-                    )
-
-                # Flush old sentence.
-                if (
-                    current_sentence is not None
-                    and current_sentence.tokens
-                ):
-                    sentences.append(current_sentence)
-
+        current_sentence = Sentence()
+        for index, (start, label) in enumerate(boundaries):
+            if label == TokenizerDataset.SENTENCE_START and current_sentence.tokens:
+                sentences.append(current_sentence)
                 current_sentence = Sentence()
-                current_form_chars = [subword]
-                current_token_id = 1
 
-            elif label == TokenizerDataset.TOKEN_START:
-                if current_sentence is None:
-                    current_sentence = Sentence()
-                    current_token_id = 1
-
-                if current_form_chars:
-                    # Token ends here. It has space_after if whitespace
-                    # exists before this new token.
-                    has_space = len(whitespace_before) > 0
-
-                    current_sentence.tokens.append(
-                        Token(
-                            id=current_token_id,
-                            form="".join(current_form_chars),
-                            space_after=has_space,
-                        )
-                    )
-
-                    current_token_id += 1
-
-                current_form_chars = [subword]
-
-            else:  # CONTINUATION
-                if current_sentence is None:
-                    current_sentence = Sentence()
-                    current_token_id = 1
-
-                # If we have a continuation but there was whitespace
-                # before it, this is technically a model error
-                # (continuation should be adjacent), but we handle it
-                # by appending the subword.
-                current_form_chars.append(subword)
-
-            last_end = end
-
-        # Flush remaining.
-        if (
-            current_form_chars
-            and current_sentence is not None
-        ):
-            # Check if there's whitespace at the very end of the text.
-            has_space = (
-                pending_whitespace
-                or len(text[last_end:]) > 0
-            )
-
+            end = boundaries[index + 1][0] if index + 1 < len(boundaries) else len(text)
+            token_text = text[start:end]
             current_sentence.tokens.append(
                 Token(
-                    id=current_token_id,
-                    form="".join(current_form_chars),
-                    space_after=has_space,
+                    id=len(current_sentence.tokens) + 1,
+                    form="".join(token_text.split()),
+                    space_after=token_text[-1].isspace(),
                 )
             )
 
-        if (
-            current_sentence is not None
-            and current_sentence.tokens
-        ):
+        if current_sentence.tokens:
             sentences.append(current_sentence)
 
         return sentences

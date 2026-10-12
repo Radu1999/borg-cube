@@ -4,6 +4,7 @@ from unittest.mock import Mock
 from src.config import BorgConfig
 from src.models.tokenizer import TokenizerModel
 from src.data.conllu import Token, Sentence
+from src.models.evaluation import evaluate_predictions, tokenizer_validation_text
 
 def test_tokenizer_whitespace():
     # Mock config
@@ -213,6 +214,89 @@ def test_tokenizer_skips_whitespace_only_offsets():
     trailing_space = model.predict("A ")
     assert [token.form for token in trailing_space[0].tokens] == ["A"]
     assert trailing_space[0].tokens[0].space_after is True
+
+
+def _predict_with_offsets(text, offsets, labels):
+    class FakeTokenizer:
+        pad_token_id = 0
+
+        def __call__(self, text, **kwargs):
+            return {
+                "input_ids": list(range(1000, 1000 + len(offsets))),
+                "offset_mapping": offsets,
+            }
+
+        def num_special_tokens_to_add(self, pair=False):
+            return 2
+
+        def prepare_for_model(self, token_ids, add_special_tokens, return_attention_mask):
+            input_ids = [101, *token_ids, 102]
+            return {"input_ids": input_ids, "attention_mask": [1] * len(input_ids)}
+
+        def get_special_tokens_mask(self, token_ids, already_has_special_tokens):
+            return [1, *([0] * len(token_ids)), 1]
+
+    model = TokenizerModel.__new__(TokenizerModel)
+    torch.nn.Module.__init__(model)
+    model.config = SimpleNamespace(
+        max_seq_length=64, resolve_device=lambda: "cpu",
+        dtype=torch.bfloat16, eval_batch_size=2,
+    )
+    model.encoder = SimpleNamespace(config=SimpleNamespace(max_position_embeddings=64))
+    model.hf_tokenizer = FakeTokenizer()
+
+    def mock_forward(input_ids, attention_mask):
+        logits = torch.zeros((*input_ids.shape, TokenizerModel.NUM_LABELS))
+        for row, ids in enumerate(input_ids.tolist()):
+            for position, token_id in enumerate(ids):
+                if token_id >= 1000:
+                    logits[row, position, labels[token_id - 1000]] = 10
+        return logits
+
+    model.forward = mock_forward
+    return model.predict(text, show_progress=False)
+
+
+def test_tokenizer_decodes_duplicate_boundaries_once():
+    sentences = _predict_with_offsets(
+        "\u4f60\u597d", [(0, 1), (0, 1), (1, 2)], [2, 2, 0],
+    )
+
+    assert len(sentences) == 1
+    assert [(token.form, token.space_after) for token in sentences[0].tokens] == [
+        ("\u4f60\u597d", False),
+    ]
+
+
+def test_tokenizer_preserves_characters_outside_subword_offsets():
+    cases = [
+        ("a\u0301", [(0, 1)], [2], [("a\u0301", False)]),
+        (
+            "\u200bA\u0301 B\u0301", [(1, 2), (3, 5)], [2, 1],
+            [("\u200bA\u0301", True), ("B\u0301", False)],
+        ),
+        ("\u200b", [], [], [("\u200b", False)]),
+    ]
+    for text, offsets, labels, expected in cases:
+        sentences = _predict_with_offsets(text, offsets, labels)
+        assert len(sentences) == 1
+        assert [(token.form, token.space_after) for token in sentences[0].tokens] == expected
+
+
+def test_tokenizer_validation_preserves_surface_text():
+    gold = [Sentence(tokens=[
+        Token(id=1, form="\u4f60\u597d"),
+        Token(id=2, form="a\u0301", space_after=False),
+    ])]
+    predicted = _predict_with_offsets(
+        tokenizer_validation_text(gold),
+        [(0, 1), (0, 1), (1, 2), (2, 4)], [2, 2, 0, 1],
+    )
+
+    metrics = evaluate_predictions(gold, predicted)
+
+    assert metrics["Tokens"].f1 == 1.0
+    assert metrics["Sentences"].f1 == 1.0
 
 
 if __name__ == "__main__":
