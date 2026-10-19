@@ -20,6 +20,7 @@ class SentenceBatch:
     attention_mask: torch.Tensor
     word_ids: List[List[int | None]]
     word_positions: List[Dict[int, int]]
+    input_char_ids: torch.Tensor | None = None
 
 
 def sentence_batches(
@@ -66,6 +67,43 @@ def sentence_batches(
                     positions.setdefault(word_id, position)
             word_positions.append(positions)
 
+        input_char_ids = None
+        if model.component == "lemmatizer":
+            vocab = model.input_vocab
+            pad_id = vocab["<PAD>"]
+            char_sequences = []
+            max_char_length = max(
+                len(token.form) + 2
+                for _, tokens in chunk
+                for token in tokens
+            )
+            for (_, tokens), ids in zip(chunk, word_ids):
+                seen_words = set()
+                char_rows = []
+                for word_id in ids:
+                    if word_id is None:
+                        continue
+                    if word_id not in seen_words:
+                        token = tokens[word_id]
+                        char_ids = [vocab["<SOS>"]]
+                        char_ids.extend(
+                            vocab.get(char, vocab["<UNK>"])
+                            for char in token.form
+                        )
+                        char_ids.append(vocab["<EOS>"])
+                        seen_words.add(word_id)
+                    else:
+                        char_ids = [pad_id]
+                    char_rows.append(
+                        char_ids + [pad_id] * (max_char_length - len(char_ids))
+                    )
+                char_sequences.append(torch.tensor(char_rows, dtype=torch.long))
+            input_char_ids = pad_sequence(
+                char_sequences,
+                batch_first=True,
+                padding_value=pad_id,
+            )
+
         # ROOT is position zero in the parser, irrespective of tokenizer padding_side.
         yield SentenceBatch(
             indices=[index for index, _ in chunk],
@@ -82,4 +120,5 @@ def sentence_batches(
             ),
             word_ids=word_ids,
             word_positions=word_positions,
+            input_char_ids=input_char_ids,
         )

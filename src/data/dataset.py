@@ -14,8 +14,8 @@ from src.data.conllu import Sentence, Token
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _build_vocab(items: List[str]) -> Dict[str, int]:
-    vocab = {"<PAD>": 0, "<UNK>": 1}
+def _build_vocab(items: List[str], initial_vocab: Optional[Dict[str, int]] = None) -> Dict[str, int]:
+    vocab = initial_vocab.copy() if initial_vocab is not None else {"<PAD>": 0, "<UNK>": 1}
     for item in sorted(set(items)):
         if item not in vocab:
             vocab[item] = len(vocab)
@@ -385,41 +385,6 @@ class ParserDataset(Dataset):
         }
 
 
-# ---------------------------------------------------------------------------
-# Lemmatizer dataset
-# ---------------------------------------------------------------------------
-
-def _compute_edit_script(form: str, lemma: str) -> str:
-    """Encode lemma as an edit script relative to the form.
-
-    Strategy: find the longest common prefix and suffix, then record
-    how many characters to strip from the end and what to append.
-
-    Returns a string like "keep3:strip2:add+en" which is compact enough
-    to classify.
-    """
-    form_l = form.lower()
-    lemma_l = lemma.lower()
-
-    # Longest common prefix
-    prefix_len = 0
-    for a, b in zip(form_l, lemma_l):
-        if a == b:
-            prefix_len += 1
-        else:
-            break
-
-    # Characters remaining after the prefix
-    form_tail = form_l[prefix_len:]
-    lemma_tail = lemma_l[prefix_len:]
-
-    # Strip suffix chars from form_tail and append lemma_tail
-    strip = len(form_tail)
-    add = lemma_tail
-
-    return f"k{prefix_len}:s{strip}:a{add}"
-
-
 class LemmatizerDataset(Dataset):
     """Token-level dataset for lemmatization via edit scripts."""
 
@@ -429,7 +394,8 @@ class LemmatizerDataset(Dataset):
         hf_tokenizer_name: str,
         max_length: int = 512,
         upos_vocab: Optional[Dict[str, int]] = None,
-        script_vocab: Optional[Dict[str, int]] = None,
+        input_vocab: Optional[Dict[str, int]] = None,
+        output_vocab: Optional[Dict[str, int]] = None
     ):
         self.hf_tok = AutoTokenizer.from_pretrained(hf_tokenizer_name)
         self.max_length = max_length
@@ -437,12 +403,11 @@ class LemmatizerDataset(Dataset):
         all_upos = [t.upos for s in sentences for t in s.regular_tokens()]
         self.upos_vocab = upos_vocab or _build_vocab(all_upos)
 
-        all_scripts = [
-            _compute_edit_script(t.form, t.lemma)
-            for s in sentences
-            for t in s.regular_tokens()
-        ]
-        self.script_vocab = script_vocab or _build_vocab(all_scripts)
+        all_input_chars = [c for s in sentences for t in s.regular_tokens() for c in t.form]
+        all_output_chars = [c for s in sentences for t in s.regular_tokens() for c in t.lemma]
+
+        self.input_vocab = input_vocab or _build_vocab(all_input_chars, initial_vocab={"<PAD>": 0, "<UNK>": 1, "<SOS>": 2, "<EOS>": 3})
+        self.output_vocab = output_vocab or _build_vocab(all_output_chars, initial_vocab={"<PAD>": 0, "<UNK>": 1, "<SOS>": 2, "<EOS>": 3}) 
         self.sentences = sentences
 
     def __len__(self) -> int:
@@ -454,22 +419,58 @@ class LemmatizerDataset(Dataset):
             "input_ids": self.hf_tok.pad_token_id,
             "attention_mask": 0,
             "upos_ids": 0,
-            "script_labels": -100,
+            "input_char_ids": torch.tensor([[0]]),
+            "output_char_ids": torch.tensor([[-100]]),
         }
-        return {
-            key: pad_sequence(
-                [example[key] for example in batch],
-                batch_first=True,
-                padding_value=padding_value,
-            )
-            for key, padding_value in padding_values.items()
-        }
+        output={}
+        for key, padding_value in padding_values.items():
+            if key=="input_char_ids" or key=="output_char_ids":
+                max_len = max(len(example[key][0]) for example in batch)
+                padded_sequences = []
+                for example in batch:
+                    seq = torch.cat([e.unsqueeze(0) for e in example[key]])
+                    pad_length = max_len - seq.shape[1]
+                    padded_seq = torch.cat([seq, torch.full((seq.shape[0], pad_length), padding_value[0][0], dtype=torch.long)], dim=1)
+                    padded_sequences.append(padded_seq)
+                
+                max_sentence_len=max(seq.shape[0] for seq in padded_sequences)
+                repadded_seqs=[]
+                for seq in padded_sequences:
+                    if seq.shape[0]<max_sentence_len:
+                        pad_length=max_sentence_len-seq.shape[0]
+                        padded_seq=torch.cat([seq, torch.full((pad_length, seq.shape[1]), padding_value[0][0], dtype=torch.long)], dim=0)
+                        repadded_seqs.append(padded_seq)
+                    else:
+                        repadded_seqs.append(seq)
+
+                output[key]= torch.stack(repadded_seqs, dim=0)
+            else:
+                output[key] = pad_sequence(
+                    [example[key] for example in batch],
+                    batch_first=True,
+                    padding_value=padding_value,
+                )   
+        return output
+
+
+    def encode_chars(self, word_list: List[str], vocab: Dict[str, int]) -> torch.Tensor:
+        """Encode a string of characters into a tensor of input IDs."""
+        char_ids_list = []
+        for text in word_list:
+            char_ids = [vocab.get('<SOS>')]+[vocab.get(c, vocab["<UNK>"]) for c in text]+[vocab.get('<EOS>')]
+            char_ids_list.append(char_ids)
+        max_len = max(len(ids) for ids in char_ids_list)
+        # Pad sequences to the same length
+        for i in range(len(char_ids_list)):
+            char_ids_list[i] += [vocab.get('<PAD>')] * (max_len - len(char_ids_list[i]))        
+        
+        return torch.tensor(char_ids_list, dtype=torch.long)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sent = self.sentences[idx]
         tokens = sent.regular_tokens()
         forms = [t.form for t in tokens]
-
+        # from ipdb import set_trace; set_trace()
         encoding = self.hf_tok(
             forms,
             is_split_into_words=True,
@@ -478,13 +479,20 @@ class LemmatizerDataset(Dataset):
             padding=False,
             return_tensors="pt",
         )
+
         input_ids = encoding["input_ids"].squeeze(0)
         attention_mask = encoding["attention_mask"].squeeze(0)
         word_ids = encoding.word_ids(batch_index=0)
 
         seq_len = input_ids.size(0)
         upos_ids = torch.zeros(seq_len, dtype=torch.long)
-        script_labels = torch.full((seq_len,), -100, dtype=torch.long)
+        
+        all_words=[t.form for t in tokens]+[''] #one for padding
+        all_lemmas=[t.lemma for t in tokens]+[''] #one for padding
+        input_encoded = self.encode_chars(all_words, self.input_vocab)
+        output_encoded = self.encode_chars(all_lemmas, self.output_vocab) 
+        input_char_ids=[]
+        output_char_ids=[]
 
         seen_words = set()
         for i, word_id in enumerate(word_ids):
@@ -495,14 +503,16 @@ class LemmatizerDataset(Dataset):
                 upos_ids[i] = self.upos_vocab.get(tok.upos, self.upos_vocab["<UNK>"])
             if word_id not in seen_words and tok is not None:
                 seen_words.add(word_id)
-                script = _compute_edit_script(tok.form, tok.lemma)
-                script_labels[i] = self.script_vocab.get(
-                    script, self.script_vocab["<UNK>"]
-                )
+                input_char_ids.append(input_encoded[word_id])
+                output_char_ids.append(output_encoded[word_id])
+            else:
+                input_char_ids.append(input_encoded[-1])  # padding
+                output_char_ids.append(output_encoded[-1])  # padding
 
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "upos_ids": upos_ids,
-            "script_labels": script_labels,
+            "input_char_ids": input_char_ids,
+            "output_char_ids": output_char_ids
         }
