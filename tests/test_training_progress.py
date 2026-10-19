@@ -12,6 +12,7 @@ class TestTrainingProgress(unittest.TestCase):
     def test_each_component_reports_per_step_metrics(self):
         expected_metrics = {
             "tokenizer": {"loss", "avg_loss", "lr"},
+            "mwt": {"loss", "avg_loss"},
             "tagger": {"loss", "avg_loss", "lr", "upos_loss", "xpos_loss", "feats_loss"},
             "parser": {"loss", "avg_loss", "lr", "arc_loss", "rel_loss"},
             "lemmatizer": {"loss", "avg_loss", "lr"},
@@ -53,7 +54,7 @@ class TestTrainingProgress(unittest.TestCase):
     def test_avg_loss_division_is_zero_safe(self):
         """avg_loss must not divide by progress.n directly, which is 0 on the
         first batch of every epoch and raises ZeroDivisionError."""
-        components = ["tokenizer", "tagger", "parser", "lemmatizer"]
+        components = ["tokenizer", "mwt", "tagger", "parser", "lemmatizer"]
 
         for component in components:
             with self.subTest(component=component):
@@ -66,10 +67,10 @@ class TestTrainingProgress(unittest.TestCase):
                     source,
                     f"{component} divides by progress.n unsafely, causing ZeroDivisionError",
                 )
-                self.assertIn(
-                    "total_loss / max(progress.n, 1)",
-                    source,
-                    f"{component} does not guard avg_loss division against progress.n == 0",
+                self.assertTrue(
+                    "total_loss / max(progress.n, 1)" in source
+                    or "total_loss / max(state.batch, 1)" in source,
+                    f"{component} does not guard avg_loss division against a zero denominator",
                 )
 
 

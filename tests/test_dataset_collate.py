@@ -77,19 +77,22 @@ def test_tagger_collate_pads_tagger_outputs():
 
 
 def test_lemmatizer_collate_pads_inputs_and_targets():
-    batch = _dataset(LemmatizerDataset).collate_fn(
+    dataset = _dataset(LemmatizerDataset)
+    batch = dataset.collate_fn(
         _batch(
             {
                 "input_ids": torch.tensor([1, 2]),
                 "attention_mask": torch.tensor([1, 1]),
                 "upos_ids": torch.tensor([2, 3]),
-                "script_labels": torch.tensor([4, 5]),
+                "input_char_ids": [torch.tensor([2, 4, 3]), torch.tensor([2, 5, 3])],
+                "output_char_ids": [torch.tensor([2, 6, 3]), torch.tensor([2, 7, 3])],
             },
             {
                 "input_ids": torch.tensor([6]),
                 "attention_mask": torch.tensor([1]),
                 "upos_ids": torch.tensor([7]),
-                "script_labels": torch.tensor([8]),
+                "input_char_ids": [torch.tensor([2, 8, 3])],
+                "output_char_ids": [torch.tensor([2, 9, 3])],
             },
         )
     )
@@ -98,12 +101,16 @@ def test_lemmatizer_collate_pads_inputs_and_targets():
         "input_ids",
         "attention_mask",
         "upos_ids",
-        "script_labels",
+        "input_char_ids",
+        "output_char_ids",
     }
     assert batch["input_ids"].tolist() == [[1, 2], [6, 99]]
     assert batch["attention_mask"].tolist() == [[1, 1], [1, 0]]
     assert batch["upos_ids"].tolist() == [[2, 3], [7, 0]]
-    assert batch["script_labels"].tolist() == [[4, 5], [8, -100]]
+    assert batch["input_char_ids"].shape == (2, 2, 3)
+    assert batch["output_char_ids"].shape == (2, 2, 3)
+    assert batch["input_char_ids"][1, 1].tolist() == [0, 0, 0]
+    assert batch["output_char_ids"][1, 1].tolist() == [-100, -100, -100]
 
 
 def test_parser_collate_pads_parser_outputs():

@@ -25,7 +25,7 @@ def _build_parser() -> argparse.ArgumentParser:
     train_p = sub.add_parser("train", help="Train a pipeline component")
     train_p.add_argument(
         "--component",
-        choices=["tokenizer", "tagger", "parser", "lemmatizer"],
+        choices=["tokenizer", "mwt", "tagger", "parser", "lemmatizer"],
         required=True,
         help="Component to train",
     )
@@ -48,7 +48,7 @@ def _build_parser() -> argparse.ArgumentParser:
     test_p.add_argument("output_file", help="Output CoNLL-U file")
     test_p.add_argument(
         "--component",
-        choices=["tokenizer", "tagger", "parser", "lemmatizer"],
+        choices=["tokenizer", "mwt", "tagger", "parser", "lemmatizer"],
         default=None,
         help="Single component to apply (default: auto-detect from directory contents)",
     )
@@ -95,7 +95,7 @@ def cmd_test(args: argparse.Namespace) -> None:
         pipeline.load_component(args.component, args.model_file)
     else:
         # Auto-detect: try to load whichever component directories exist
-        for comp in ["tokenizer", "tagger", "parser", "lemmatizer"]:
+        for comp in ["tokenizer", "mwt", "tagger", "parser", "lemmatizer"]:
             comp_dir = os.path.join(args.model_file, comp)
             if os.path.isdir(comp_dir):
                 pipeline.load_component(comp, comp_dir)

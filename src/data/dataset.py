@@ -31,13 +31,7 @@ def _feats_to_str(token: Token) -> str:
 # ---------------------------------------------------------------------------
 
 class TokenizerDataset(Dataset):
-    """Character-level dataset for sentence/token boundary detection.
-
-    Labels per character:
-        0 = continuation (inside a token)
-        1 = token-start (first char of a token, not sentence-start)
-        2 = sentence-start (first char of first token in a sentence)
-    """
+    """Character-level dataset for sentence/token boundary detection."""
 
     CONTINUATION = 0
     TOKEN_START = 1
@@ -51,14 +45,10 @@ class TokenizerDataset(Dataset):
     ):
         self.max_length = max_length
         self.hf_tok = AutoTokenizer.from_pretrained(hf_tokenizer_name)
-
-        # Build (text_chunk, label_list) pairs from the raw text reconstructed
-        # out of CoNLL-U sentences.
         self.examples: List[Tuple[str, List[int]]] = []
         self._build_examples(sentences)
-    
+
     def collate_fn(self, batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
-        """Right-pad tokenizer examples to the longest sequence in this batch."""
         padding_values = {
             "input_ids": self.hf_tok.pad_token_id,
             "attention_mask": 0,
@@ -74,7 +64,6 @@ class TokenizerDataset(Dataset):
         }
 
     def _build_examples(self, sentences: List[Sentence]) -> None:
-        # We group sentences into chunks that fit within max_length.
         chars: List[str] = []
         labels: List[int] = []
 
@@ -452,7 +441,6 @@ class LemmatizerDataset(Dataset):
                 )   
         return output
 
-
     def encode_chars(self, word_list: List[str], vocab: Dict[str, int]) -> torch.Tensor:
         """Encode a string of characters into a tensor of input IDs."""
         char_ids_list = []
@@ -460,17 +448,14 @@ class LemmatizerDataset(Dataset):
             char_ids = [vocab.get('<SOS>')]+[vocab.get(c, vocab["<UNK>"]) for c in text]+[vocab.get('<EOS>')]
             char_ids_list.append(char_ids)
         max_len = max(len(ids) for ids in char_ids_list)
-        # Pad sequences to the same length
         for i in range(len(char_ids_list)):
             char_ids_list[i] += [vocab.get('<PAD>')] * (max_len - len(char_ids_list[i]))        
-        
         return torch.tensor(char_ids_list, dtype=torch.long)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sent = self.sentences[idx]
         tokens = sent.regular_tokens()
         forms = [t.form for t in tokens]
-        # from ipdb import set_trace; set_trace()
         encoding = self.hf_tok(
             forms,
             is_split_into_words=True,
@@ -479,21 +464,18 @@ class LemmatizerDataset(Dataset):
             padding=False,
             return_tensors="pt",
         )
-
         input_ids = encoding["input_ids"].squeeze(0)
         attention_mask = encoding["attention_mask"].squeeze(0)
         word_ids = encoding.word_ids(batch_index=0)
 
         seq_len = input_ids.size(0)
         upos_ids = torch.zeros(seq_len, dtype=torch.long)
-        
-        all_words=[t.form for t in tokens]+[''] #one for padding
-        all_lemmas=[t.lemma for t in tokens]+[''] #one for padding
+        all_words=[t.form for t in tokens]+['']
+        all_lemmas=[t.lemma for t in tokens]+['']
         input_encoded = self.encode_chars(all_words, self.input_vocab)
-        output_encoded = self.encode_chars(all_lemmas, self.output_vocab) 
-        input_char_ids=[]
-        output_char_ids=[]
-
+        output_encoded = self.encode_chars(all_lemmas, self.output_vocab)
+        input_char_ids = []
+        output_char_ids = []
         seen_words = set()
         for i, word_id in enumerate(word_ids):
             if word_id is None:
@@ -506,8 +488,8 @@ class LemmatizerDataset(Dataset):
                 input_char_ids.append(input_encoded[word_id])
                 output_char_ids.append(output_encoded[word_id])
             else:
-                input_char_ids.append(input_encoded[-1])  # padding
-                output_char_ids.append(output_encoded[-1])  # padding
+                input_char_ids.append(input_encoded[-1])
+                output_char_ids.append(output_encoded[-1])
 
         return {
             "input_ids": input_ids,
@@ -516,3 +498,146 @@ class LemmatizerDataset(Dataset):
             "input_char_ids": input_char_ids,
             "output_char_ids": output_char_ids
         }
+
+
+class MWTDataset(Dataset):
+    """Sentence-level character dataset for multiword-token expansion."""
+
+    def __init__(
+        self,
+        sentences: List[Sentence],
+        hf_tokenizer_name: str,
+        max_length: int = 512,
+        output_vocab: Optional[Dict[str, int]] = None,
+        input_vocab: Optional[Dict[str, int]] = None,
+    ):
+        self.hf_tok = AutoTokenizer.from_pretrained(hf_tokenizer_name)
+        self.max_length = max_length
+        self.sentences = sentences
+        self.input_vocab = input_vocab or _build_vocab(
+            [char for sentence in sentences for token in sentence.surface_tokens() for char in token.form],
+            initial_vocab={"<PAD>": 0, "<UNK>": 1, "<SOS>": 2, "<EOS>": 3},
+        )
+        target_chars = [
+            char
+            for sentence in sentences
+            for token in sentence.surface_tokens()
+            for char in self._expansion_targets(sentence).get(token.id, token.form)
+        ]
+        self.output_vocab = output_vocab or _build_vocab(
+            target_chars,
+            initial_vocab={"<PAD>": 0, "<UNK>": 1, "<SOS>": 2, "<EOS>": 3},
+        )
+
+    @staticmethod
+    def _expansion_targets(sentence: Sentence) -> Dict[int | str, str]:
+        targets = {}
+        regular_tokens = sentence.regular_tokens()
+        for token in sentence.tokens:
+            if not token.is_multiword():
+                continue
+            try:
+                start, end = map(int, str(token.id).split("-", 1))
+            except ValueError:
+                continue
+            components = [
+                part.form
+                for part in regular_tokens
+                if isinstance(part.id, int) and start <= part.id <= end
+            ]
+            if len(components) >= 2:
+                targets[token.id] = " ".join(components)
+        return targets
+
+    def __len__(self) -> int:
+        return len(self.sentences)
+
+    def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
+        sentence = self.sentences[index]
+        tokens = sentence.surface_tokens()
+        forms = [token.form for token in tokens]
+        targets = self._expansion_targets(sentence)
+        encoding = self.hf_tok(
+            forms,
+            is_split_into_words=True,
+            max_length=self.max_length,
+            truncation=True,
+            padding=False,
+            return_tensors="pt",
+        )
+        word_ids = encoding.word_ids(batch_index=0)
+        input_char_ids = []
+        output_char_ids = []
+        seen_words = set()
+        all_words = [token.form for token in tokens] + [""]
+        all_targets = [targets.get(token.id, token.form) for token in tokens] + [""]
+        input_encoded = self.encode_chars(all_words, self.input_vocab)
+        output_encoded = self.encode_chars(all_targets, self.output_vocab)
+        for word_id in word_ids:
+            if word_id is None:
+                continue
+            if word_id not in seen_words and word_id < len(tokens):
+                seen_words.add(word_id)
+                input_char_ids.append(input_encoded[word_id])
+                output_char_ids.append(output_encoded[word_id])
+            else:
+                input_char_ids.append(input_encoded[-1])
+                output_char_ids.append(output_encoded[-1])
+        return {
+            "input_ids": encoding["input_ids"].squeeze(0),
+            "attention_mask": encoding["attention_mask"].squeeze(0),
+            "input_char_ids": input_char_ids,
+            "output_char_ids": output_char_ids,
+        }
+
+    def encode_chars(self, word_list: List[str], vocab: Dict[str, int]) -> torch.Tensor:
+        char_ids_list = []
+        for text in word_list:
+            char_ids = [vocab["<SOS>"]]
+            char_ids.extend(vocab.get(char, vocab["<UNK>"]) for char in text)
+            char_ids.append(vocab["<EOS>"])
+            char_ids_list.append(char_ids)
+        max_len = max(len(ids) for ids in char_ids_list)
+        for ids in char_ids_list:
+            ids.extend([vocab["<PAD>"]] * (max_len - len(ids)))
+        return torch.tensor(char_ids_list, dtype=torch.long)
+
+    def collate_fn(
+        self,
+        batch: List[Dict[str, torch.Tensor]],
+    ) -> Dict[str, torch.Tensor]:
+        padding_values = {
+            "input_ids": self.hf_tok.pad_token_id,
+            "attention_mask": 0,
+            "input_char_ids": torch.tensor([[0]]),
+            "output_char_ids": torch.tensor([[-100]]),
+        }
+        output = {}
+        for key, padding_value in padding_values.items():
+            if key in ("input_char_ids", "output_char_ids"):
+                max_len = max(len(example[key][0]) for example in batch)
+                padded_sequences = []
+                for example in batch:
+                    seq = torch.cat([item.unsqueeze(0) for item in example[key]])
+                    pad_length = max_len - seq.shape[1]
+                    pad_value = padding_value[0][0]
+                    padded_sequences.append(torch.cat([
+                        seq,
+                        torch.full((seq.shape[0], pad_length), pad_value, dtype=torch.long),
+                    ], dim=1))
+                max_sentence_len = max(seq.shape[0] for seq in padded_sequences)
+                repadded = []
+                for seq in padded_sequences:
+                    pad_length = max_sentence_len - seq.shape[0]
+                    repadded.append(torch.cat([
+                        seq,
+                        torch.full((pad_length, seq.shape[1]), padding_value[0][0], dtype=torch.long),
+                    ], dim=0))
+                output[key] = torch.stack(repadded)
+            else:
+                output[key] = pad_sequence(
+                    [example[key] for example in batch],
+                    batch_first=True,
+                    padding_value=padding_value,
+                )
+        return output
