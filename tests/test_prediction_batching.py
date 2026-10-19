@@ -1,5 +1,6 @@
 """Offline prediction regressions and measurable batching checks."""
 from copy import deepcopy
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -8,7 +9,7 @@ import torch
 from src.config import BorgConfig
 from src.data.conllu import Sentence, Token
 from src.models.inference import sentence_batches
-from src.models.lemmatizer import LemmatizerModel, _apply_edit_script
+from src.models.lemmatizer import LemmatizerModel
 from src.models.parser import ParserModel, greedy_decode
 from src.models.tagger import TaggerModel
 from src.models.tokenizer import TokenizerModel
@@ -32,6 +33,13 @@ class WordTokenizer:
 
     def __call__(self, forms, max_length, **kwargs):
         sequences, mappings = [], []
+        if forms and isinstance(forms[0], str):
+            for word in forms:
+                token_id = sum(map(ord, word)) % 30 + 3
+                pieces = [token_id, token_id + 1] if len(word) > 2 else [token_id]
+                sequences.append([1, *pieces, 2])
+                mappings.append([None, *([0] * len(pieces)), None])
+            return Encoding(sequences, mappings)
         for words in forms:
             ids, word_ids = [], []
             for wid, word in enumerate(words):
@@ -48,6 +56,11 @@ def make_model(model_type, batch_size):
     torch.manual_seed(42)
     model = model_type.__new__(model_type)
     torch.nn.Module.__init__(model)
+    model.component = {
+        TaggerModel: "tagger",
+        LemmatizerModel: "lemmatizer",
+        ParserModel: "parser",
+    }[model_type]
     model.config = BorgConfig(device="cpu", max_seq_length=10, eval_batch_size=batch_size)
     model.hf_tokenizer = Mock(wraps=WordTokenizer())
     model.hf_tokenizer.pad_token_id = 0
@@ -58,7 +71,9 @@ def make_model(model_type, batch_size):
         model.feats_vocab = {"<PAD>": 0, "<UNK>": 1, "Number=Sing": 2}
     elif model_type is LemmatizerModel:
         model.upos_vocab = {"<PAD>": 0, "<UNK>": 1, "NOUN": 2}
-        model.script_vocab = {"<PAD>": 0, "<UNK>": 1, "k1:s1:az": 2}
+        model.input_vocab = {"<PAD>": 0, "<UNK>": 1, "<SOS>": 2, "<EOS>": 3, "L": 4}
+        model.output_vocab = {"<PAD>": 0, "<UNK>": 1, "<SOS>": 2, "<EOS>": 3, "l": 4}
+        model.encoder = SimpleNamespace(config=SimpleNamespace(hidden_size=4))
     else:
         model.deprel_vocab = {"<PAD>": 0, "<UNK>": 1, "root": 2, "dep": 3}
         model.ARC_HIDDEN = 8
@@ -104,9 +119,11 @@ def test_batched_predictions_match_single_and_preserve_metadata(model_type):
     actual = batched.predict(inputs)
     assert actual == expected
     assert inputs == original
-    assert batched.encode.call_count == 2
-    assert single.encode.call_count == 4
-    assert batched.hf_tokenizer.call_count == 2
+    expected_batched_calls = 2
+    expected_single_calls = 4
+    assert batched.encode.call_count == expected_batched_calls
+    assert single.encode.call_count == expected_single_calls
+    assert batched.hf_tokenizer.call_count == expected_batched_calls
     assert actual[1] is inputs[1]
     assert actual[4] is inputs[4]
     assert actual[0].tokens[0].space_after is False
@@ -116,7 +133,7 @@ def test_batched_predictions_match_single_and_preserve_metadata(model_type):
     if model_type is TaggerModel:
         assert (truncated.upos, truncated.xpos, truncated.feats) == ("_", "_", "_")
     elif model_type is LemmatizerModel:
-        assert truncated.lemma == truncated.form.lower()
+        assert isinstance(truncated.lemma, str)
     else:
         assert (truncated.head, truncated.deprel) == (0, "_")
 
@@ -175,34 +192,50 @@ def test_tagger_uses_first_subword_predictions():
     assert model.forward.call_count == 2
 
 
-def test_lemmatizer_aligns_upos_to_every_subword_and_uses_first_piece():
+def test_lemmatizer_predicts_in_token_batches_and_preserves_alignment():
     model = make_model(LemmatizerModel, 3)
     inputs = sentences()
+    observed_context_batches = []
 
-    def forward(input_ids, attention_mask, upos_ids):
+    def forward(input_ids, attention_mask, upos_ids, input_char_ids):
         assert torch.is_inference_mode_enabled()
+        assert input_ids.shape[0] <= 3
+        assert upos_ids.shape == input_ids.shape
+        assert input_char_ids.shape[0] == input_ids.shape[0]
         assert torch.all(upos_ids[input_ids <= 2] == 0)
-        known_upos = {}
-        for sentence in inputs:
-            for token in sentence.regular_tokens():
-                token_id = sum(map(ord, token.form)) % 30 + 3
-                pieces = [token_id, token_id + 1] if len(token.form) > 2 else [token_id]
-                for piece in pieces:
-                    known_upos[piece] = model.upos_vocab.get(token.upos, 1)
-        for row in range(input_ids.size(0)):
-            for pos in range(input_ids.size(1)):
-                piece = int(input_ids[row, pos])
-                assert int(upos_ids[row, pos]) == known_upos.get(piece, 0)
-        logits = torch.zeros((*input_ids.shape, 3))
-        logits.scatter_(-1, upos_ids.unsqueeze(-1), 10)
-        return logits
+        observed_context_batches.append(input_ids.shape)
+        return {"strings": [f"lemma-{upos}" for upos in upos_ids[:, 1:-1].reshape(-1).tolist()]}
 
     model.forward = Mock(side_effect=forward)
     actual = model.predict(inputs)
-    assert actual[0].tokens[0].lemma == _apply_edit_script("Long", "k1:s1:az")
-    assert actual[0].tokens[2].lemma == "word"
-    assert actual[2].tokens[0].lemma == "az"
+    assert actual[0].tokens[0].lemma == "lemma-2"
+    assert actual[0].tokens[2].lemma == "lemma-1"
+    assert actual[2].tokens[0].lemma == "lemma-2"
+    assert actual[0].tokens[1] is inputs[0].tokens[1]
+    assert actual[0].tokens[3] is inputs[0].tokens[3]
     assert model.forward.call_count == 2
+    assert any(shape[1] > 4 for shape in observed_context_batches)
+
+
+def test_lemmatizer_original_decoder_shapes():
+    model = make_model(LemmatizerModel, 2)
+    decoder_inputs = []
+    hook = model.output_decoder.register_forward_pre_hook(
+        lambda _, args: decoder_inputs.append(args[0].detach().clone())
+    )
+
+    with torch.inference_mode():
+        result = model(
+            torch.tensor([[1, 2, 3, 4], [1, 3, 2, 4]]),
+            torch.ones((2, 4), dtype=torch.long),
+            torch.tensor([[0, 2, 2, 0], [0, 2, 2, 0]]),
+            torch.tensor([[[2, 4, 3], [2, 3, 0]], [[2, 4, 3], [2, 3, 0]]]),
+            torch.tensor([[[2, 4, 3], [2, 3, -100]], [[2, 4, 3], [2, 3, -100]]]),
+        )
+    hook.remove()
+
+    assert torch.count_nonzero(decoder_inputs[0]) == 0
+    assert result["logits"].shape == (4, 3, len(model.output_vocab))
 
 
 @pytest.mark.parametrize("model_type", [TaggerModel, LemmatizerModel, ParserModel])

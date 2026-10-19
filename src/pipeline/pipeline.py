@@ -9,11 +9,12 @@ from src.data.conllu import Sentence, read_conllu, write_conllu
 
 
 class BorgPipeline:
-    """Orchestrates tokenizer → tagger → parser → lemmatizer."""
+    """Orchestrates tokenizer → MWT expansion → tagger → parser → lemmatizer."""
 
     def __init__(self, config: Optional[BorgConfig] = None):
         self.config = config or BorgConfig()
         self.tokenizer_model = None
+        self.mwt_model = None
         self.tagger_model = None
         self.parser_model = None
         self.lemmatizer_model = None
@@ -24,6 +25,9 @@ class BorgPipeline:
         if component == "tokenizer":
             from src.models.tokenizer import TokenizerModel
             self.tokenizer_model = TokenizerModel.load(model_path, self.config)
+        elif component == "mwt":
+            from src.models.mwt import MWTModel
+            self.mwt_model = MWTModel.load(model_path, self.config)
         elif component == "tagger":
             from src.models.tagger import TaggerModel
             self.tagger_model = TaggerModel.load(model_path, self.config)
@@ -55,6 +59,10 @@ class BorgPipeline:
             from src.models.tokenizer import TokenizerModel
             TokenizerModel.train_model(train_sentences, dev_sentences, self.config, component_path, resume=resume)
 
+        elif component == "mwt":
+            from src.models.mwt import MWTModel
+            MWTModel.train_model(train_sentences, dev_sentences, self.config, component_path, resume=resume)
+
         elif component == "tagger":
             from src.models.tagger import TaggerModel
             TaggerModel.train_model(train_sentences, dev_sentences, self.config, component_path, resume=resume)
@@ -76,9 +84,10 @@ class BorgPipeline:
 
         Steps applied in order depending on which components are loaded:
         1. Tokenization (if tokenizer_model present)
-        2. POS tagging
-        3. Dependency parsing
-        4. Lemmatization
+        2. MWT expansion
+        3. POS tagging
+        4. Dependency parsing
+        5. Lemmatization
         """
         # Step 1: tokenize
         if self.tokenizer_model is not None:
@@ -90,6 +99,9 @@ class BorgPipeline:
             sentences = [
                 Sentence(tokens=[Token(id=i + 1, form=w) for i, w in enumerate(words)])
             ]
+
+        if self.mwt_model is not None:
+            sentences = self.mwt_model.predict(sentences)
 
         # Step 2: tag
         if self.tagger_model is not None:
@@ -128,6 +140,8 @@ class BorgPipeline:
         else:
             # CoNLL-U input — skip tokenization
             sentences = read_conllu(input_file)
+            if self.mwt_model is not None:
+                sentences = self.mwt_model.predict(sentences)
             if self.tagger_model is not None:
                 sentences = self.tagger_model.predict(sentences)
             if self.parser_model is not None:

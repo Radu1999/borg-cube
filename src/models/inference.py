@@ -33,8 +33,13 @@ def sentence_batches(
     if batch_size < 1:
         raise ValueError("eval_batch_size must be positive")
 
+    token_getter = (
+        Sentence.surface_tokens
+        if model.component == "mwt"
+        else Sentence.regular_tokens
+    )
     examples = [
-        (index, sentence.regular_tokens())
+        (index, token_getter(sentence))
         for index, sentence in enumerate(sentences)
     ]
     examples = sorted(
@@ -68,7 +73,7 @@ def sentence_batches(
             word_positions.append(positions)
 
         input_char_ids = None
-        if model.component == "lemmatizer":
+        if model.component in ("lemmatizer", "mwt"):
             vocab = model.input_vocab
             pad_id = vocab["<PAD>"]
             char_sequences = []

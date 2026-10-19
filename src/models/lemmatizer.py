@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
+from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import get_linear_schedule_with_warmup
@@ -120,7 +121,6 @@ class LemmatizerModel(BorgBaseModel):
         output_char_ids: Optional[torch.Tensor] = None,
         max_output_length: int = 200,
     ) -> torch.Tensor:
-
         hidden = self.encode(
             input_ids,
             attention_mask,
@@ -135,15 +135,14 @@ class LemmatizerModel(BorgBaseModel):
             dim=-1,
         )  # (B, L, H+E)
 
-        concat=concat[:,1:-1,:] #remove CLS and SEP tokens
+        concat=concat[:,1:-1,:]
         concat=concat.reshape((concat.shape[0]*concat.shape[1], -1))
         input_char_ids=input_char_ids.reshape((input_char_ids.shape[0]*input_char_ids.shape[1], input_char_ids.shape[2]))
         output_char_ids=output_char_ids.reshape((output_char_ids.shape[0]*output_char_ids.shape[1], output_char_ids.shape[2])) if output_char_ids is not None else None
         
         input_char_emb = self.input_embedding(input_char_ids)
-        # input_char_emb=input_char_emb.reshape((input_char_emb.shape[0]*input_char_emb.shape[1], input_char_emb.shape[2], -1))
         concat=concat.unsqueeze(1).repeat(1, input_char_emb.shape[1], 1)
-        input_embedding= torch.cat([concat, input_char_emb], dim=-1) 
+        input_embedding= torch.cat([concat, input_char_emb], dim=-1)
         encoder_states, _=self.input_encoder(input_embedding)
         
         output_strings=["" for _ in range(input_char_ids.shape[0])]
@@ -152,12 +151,11 @@ class LemmatizerModel(BorgBaseModel):
         output_logits=[]
         last_output_embeddings=torch.zeros((input_char_ids.shape[0], 1, input_char_emb.shape[2]+encoder_states.shape[2]), device=encoder_states.device)
         decoder_hidden=None
-        # we clamp the output_char_emb (-100 is used for padding for loss, but we need 0 for embedding)
         if output_char_ids is not None:
-            output_char_ids=torch.clamp(output_char_ids, min=0) 
+            output_char_ids=torch.clamp(output_char_ids, min=0)
             max_output_length=output_char_ids.shape[1]
             
-        for step in range(max_output_length):            
+        for step in range(max_output_length):
             decoder_output, decoder_hidden=self.output_decoder(last_output_embeddings, decoder_hidden)
             logits=self.output_logit(decoder_output)
             output_logits.append(logits)
@@ -184,7 +182,7 @@ class LemmatizerModel(BorgBaseModel):
             last_output_embeddings=torch.cat([output_char_emb, attention_output], dim=-1)
         # from ipdb import set_trace; set_trace()
         return {
-            "logits": torch.cat(output_logits, dim=1),  # (B, T, V)
+            "logits": torch.cat(output_logits, dim=1),
             "strings": output_strings
         }
 
@@ -373,9 +371,7 @@ class LemmatizerModel(BorgBaseModel):
 
                     progress.set_postfix(
                         loss=f"{loss.item():.4f}",
-                        avg_loss=(
-                            f"{state.total_loss / state.batch:.4f}"
-                        ),
+                        avg_loss=(f"{state.total_loss / state.batch:.4f}"),
                         lr=(
                             f"{scheduler.get_last_lr()[0]:.2e}"
                         ),
@@ -418,12 +414,6 @@ class LemmatizerModel(BorgBaseModel):
 
         self.eval()
         self.to(device)
-
-        # inv_script = {
-        #     v: k
-        #     for k, v in self.script_vocab.items()
-        # }
-
         results = list(sentences)
         for batch in sentence_batches(self, sentences, show_progress=show_progress):
             if batch.input_char_ids is None:
@@ -449,7 +439,7 @@ class LemmatizerModel(BorgBaseModel):
                     batch.attention_mask.to(device),
                     upos_ids.to(device),
                     batch.input_char_ids.to(device),
-                )['strings']
+                )["strings"]
 
             for row, index in enumerate(batch.indices):
                 sent = sentences[index]

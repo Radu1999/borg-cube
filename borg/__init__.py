@@ -27,15 +27,15 @@ class Cube:
         Language code (used for locating default model files).
     model_path:
         Base directory containing sub-directories for each component
-        (``tokenizer/``, ``tagger/``, ``parser/``, ``lemmatizer/``).
+        (``tokenizer/``, ``mwt/``, ``tagger/``, ``parser/``, ``lemmatizer/``).
         If *None*, defaults to ``~/.borg_cube/<lang>/``.
     components:
-        List of components to load.  Defaults to all four.
+        List of components to load. Defaults to all pipeline components.
     config:
         Optional :class:`~src.config.BorgConfig` instance.
     """
 
-    DEFAULT_COMPONENTS = ["tokenizer", "tagger", "parser", "lemmatizer"]
+    DEFAULT_COMPONENTS = ["tokenizer", "mwt", "tagger", "parser", "lemmatizer"]
 
     def __init__(
         self,

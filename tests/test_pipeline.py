@@ -208,6 +208,7 @@ class TestPipelineInit(unittest.TestCase):
         from src.pipeline.pipeline import BorgPipeline
         pipeline = BorgPipeline()
         self.assertIsNone(pipeline.tokenizer_model)
+        self.assertIsNone(pipeline.mwt_model)
         self.assertIsNone(pipeline.tagger_model)
         self.assertIsNone(pipeline.parser_model)
         self.assertIsNone(pipeline.lemmatizer_model)
@@ -525,12 +526,13 @@ class TestPipelineTrainingPaths(unittest.TestCase):
     def test_train_component_forwards_resume_to_all_trainers(self):
         from src.pipeline.pipeline import BorgPipeline
 
-        for component in ("tokenizer", "tagger", "parser", "lemmatizer"):
+        for component in ("tokenizer", "mwt", "tagger", "parser", "lemmatizer"):
             with self.subTest(component=component):
                 module_name = f"src.models.{component}"
                 module = types.ModuleType(module_name)
                 train_model = MagicMock()
-                setattr(module, f"{component.capitalize()}Model", types.SimpleNamespace(train_model=train_model))
+                model_name = "MWTModel" if component == "mwt" else f"{component.capitalize()}Model"
+                setattr(module, model_name, types.SimpleNamespace(train_model=train_model))
                 pipeline = BorgPipeline()
                 with patch("src.pipeline.pipeline.read_conllu", return_value=[]):
                     with patch.dict(sys.modules, {module_name: module}):
