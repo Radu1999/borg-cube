@@ -29,19 +29,22 @@ def test_tokenizer_collate_pads_tokenizer_outputs():
                 "input_ids": torch.tensor([1, 2]),
                 "attention_mask": torch.tensor([1, 1]),
                 "labels": torch.tensor([2, 0]),
+                "mwt_labels": torch.tensor([1, -100]),
             },
             {
                 "input_ids": torch.tensor([3]),
                 "attention_mask": torch.tensor([1]),
                 "labels": torch.tensor([1]),
+                "mwt_labels": torch.tensor([0]),
             },
         )
     )
 
-    assert set(batch) == {"input_ids", "attention_mask", "labels"}
+    assert set(batch) == {"input_ids", "attention_mask", "labels", "mwt_labels"}
     assert batch["input_ids"].tolist() == [[1, 2], [3, 99]]
     assert batch["attention_mask"].tolist() == [[1, 1], [1, 0]]
     assert batch["labels"].tolist() == [[2, 0], [1, -100]]
+    assert batch["mwt_labels"].tolist() == [[1, -100], [0, -100]]
 
 
 def test_tagger_collate_pads_tagger_outputs():

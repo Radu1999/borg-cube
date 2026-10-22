@@ -27,6 +27,7 @@ class Token:
     deps: str = "_"
     misc: str = "_"
     space_after: bool = True
+    is_mwt: bool = False
 
     # Convenience helpers
     def is_multiword(self) -> bool:

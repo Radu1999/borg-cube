@@ -45,7 +45,7 @@ class TokenizerDataset(Dataset):
     ):
         self.max_length = max_length
         self.hf_tok = AutoTokenizer.from_pretrained(hf_tokenizer_name)
-        self.examples: List[Tuple[str, List[int]]] = []
+        self.examples: List[Tuple[str, List[int], List[int]]] = []
         self._build_examples(sentences)
 
     def collate_fn(self, batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
@@ -53,6 +53,7 @@ class TokenizerDataset(Dataset):
             "input_ids": self.hf_tok.pad_token_id,
             "attention_mask": 0,
             "labels": -100,
+            "mwt_labels": -100,
         }
         return {
             key: pad_sequence(
@@ -66,12 +67,14 @@ class TokenizerDataset(Dataset):
     def _build_examples(self, sentences: List[Sentence]) -> None:
         chars: List[str] = []
         labels: List[int] = []
+        mwt_labels: List[int] = []
 
         def flush():
             if chars:
-                self.examples.append(("".join(chars), list(labels)))
+                self.examples.append(("".join(chars), list(labels), list(mwt_labels)))
                 chars.clear()
                 labels.clear()
+                mwt_labels.clear()
 
         for sent in sentences:
             tokens = sent.surface_tokens()
@@ -79,6 +82,7 @@ class TokenizerDataset(Dataset):
                 continue
             sentence_text = ""
             sentence_labels: List[int] = []
+            sentence_mwt_labels: List[int] = []
             for tok_idx, tok in enumerate(tokens):
                 form = tok.form
                 for char_idx, ch in enumerate(form):
@@ -90,12 +94,16 @@ class TokenizerDataset(Dataset):
                         lbl = self.CONTINUATION
                     sentence_text += ch
                     sentence_labels.append(lbl)
+                    sentence_mwt_labels.append(
+                        int(tok.is_multiword()) if char_idx == 0 else -100
+                    )
 
                 # Handle SpaceAfter: add actual whitespace from the Token if available
                 if tok_idx < len(tokens) - 1:
                     if tok.space_after:
                         sentence_text += " "
                         sentence_labels.append(self.CONTINUATION)
+                        sentence_mwt_labels.append(-100)
                     else:
                         # No space between tokens (e.g. "don't" -> "do", "'t")
                         pass
@@ -103,12 +111,14 @@ class TokenizerDataset(Dataset):
                     # Trailing space at the end of the sentence
                     sentence_text += " "
                     sentence_labels.append(self.CONTINUATION)
+                    sentence_mwt_labels.append(-100)
 
             # Check if adding this sentence exceeds limit; flush first if so.
             if len(chars) + len(sentence_text) > self.max_length and chars:
                 flush()
             chars.extend(sentence_text)
             labels.extend(sentence_labels)
+            mwt_labels.extend(sentence_mwt_labels)
 
         flush()
 
@@ -116,7 +126,7 @@ class TokenizerDataset(Dataset):
         return len(self.examples)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        text, char_labels = self.examples[idx]
+        text, char_labels, char_mwt_labels = self.examples[idx]
         encoding = self.hf_tok(
             text,
             return_offsets_mapping=True,
@@ -134,6 +144,7 @@ class TokenizerDataset(Dataset):
 
         seq_len = input_ids.size(0)
         aligned_labels = torch.zeros(seq_len, dtype=torch.long)
+        aligned_mwt_labels = torch.full((seq_len,), -100, dtype=torch.long)
 
         for i, (start, end) in enumerate(offset_mapping.tolist()):
             if start == 0 and end == 0:
@@ -151,6 +162,7 @@ class TokenizerDataset(Dataset):
                     char_idx += 1
                 if char_idx < len(char_labels):
                     aligned_labels[i] = char_labels[char_idx]
+                    aligned_mwt_labels[i] = char_mwt_labels[char_idx]
                 else:
                     aligned_labels[i] = self.CONTINUATION
 
@@ -158,6 +170,7 @@ class TokenizerDataset(Dataset):
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "labels": aligned_labels,
+            "mwt_labels": aligned_mwt_labels,
         }
 
 

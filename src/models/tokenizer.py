@@ -15,6 +15,7 @@ from transformers import get_linear_schedule_with_warmup
 from src.config import BorgConfig
 from src.data.conllu import Sentence, Token
 from src.data.dataset import TokenizerDataset
+from eval.conll18_ud_eval import EvalResult
 from src.models.base import BorgBaseModel
 from src.models.checkpoints import TrainingState
 from src.models.evaluation import (
@@ -28,6 +29,55 @@ from src.models.evaluation import (
 _LABELS = {0: "C", 1: "T", 2: "S"}  # Continuation / Token-start / Sentence-start
 
 
+def _mwt_surface_metrics(
+    gold_sentences: List[Sentence],
+    predicted_sentences: List[Sentence],
+    text: str,
+) -> EvalResult:
+    def positive_spans(sentences: List[Sentence], *, gold: bool) -> set[tuple[int, int]]:
+        spans = set()
+        cursor = 0
+        for sentence in sentences:
+            for token in sentence.surface_tokens():
+                start = text.find(token.form, cursor)
+                if start < 0:
+                    continue
+                end = start + len(token.form)
+                is_mwt = token.is_multiword() if gold else token.is_mwt
+                if is_mwt:
+                    spans.add((start, end))
+                cursor = end
+                while cursor < len(text) and text[cursor].isspace():
+                    cursor += 1
+        return spans
+
+    gold_spans = positive_spans(gold_sentences, gold=True)
+    predicted_spans = positive_spans(predicted_sentences, gold=False)
+    true_positives = len(gold_spans & predicted_spans)
+    false_positives = len(predicted_spans - gold_spans)
+    false_negatives = len(gold_spans - predicted_spans)
+    precision = (
+        true_positives / (true_positives + false_positives)
+        if true_positives + false_positives else 0.0
+    )
+    recall = (
+        true_positives / (true_positives + false_negatives)
+        if true_positives + false_negatives else 0.0
+    )
+    f_score = (
+        2 * precision * recall / (precision + recall)
+        if precision + recall else 0.0
+    )
+    return EvalResult(
+        precision=precision,
+        recall=recall,
+        f1=f_score,
+        aligned_count=true_positives,
+        gold_count=len(gold_spans),
+        system_count=len(predicted_spans),
+    )
+
+
 class TokenizerModel(BorgBaseModel):
     """Predicts sentence/token boundaries at sub-word level."""
 
@@ -36,18 +86,22 @@ class TokenizerModel(BorgBaseModel):
     def __init__(self, config: BorgConfig):
         super().__init__(config, "tokenizer")
         self.classifier = nn.Linear(self.hidden_size, self.NUM_LABELS)
+        self.mwt_classifier = nn.Linear(self.hidden_size, 2)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         hidden = self.encode(input_ids, attention_mask)  # (B, L, H)
-        return self.classifier(hidden)  # (B, L, num_labels)
+        return self.classifier(hidden), self.mwt_classifier(hidden)
 
     # ------------------------------------------------------------------
     def _get_extras(self) -> Dict[str, Any]:
-        return {"classifier": self.classifier.state_dict()}
+        return {
+            "classifier": self.classifier.state_dict(),
+            "mwt_classifier": self.mwt_classifier.state_dict(),
+        }
 
     def _set_extras(self, extras: Dict[str, Any]) -> None:
         # `BorgBaseModel.load` reconstructs instances via `BorgBaseModel.__init__`
@@ -55,6 +109,12 @@ class TokenizerModel(BorgBaseModel):
         # exist yet. Rebuild it before loading the saved weights.
         self.classifier = nn.Linear(self.hidden_size, self.NUM_LABELS)
         self.classifier.load_state_dict(extras["classifier"])
+        self.mwt_classifier = nn.Linear(self.hidden_size, 2)
+        if "mwt_classifier" in extras:
+            self.mwt_classifier.load_state_dict(extras["mwt_classifier"])
+        else:
+            nn.init.zeros_(self.mwt_classifier.weight)
+            nn.init.zeros_(self.mwt_classifier.bias)
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -116,6 +176,7 @@ class TokenizerModel(BorgBaseModel):
                     input_ids = batch["input_ids"].to(device)
                     attention_mask = batch["attention_mask"].to(device)
                     labels = batch["labels"].to(device)
+                    mwt_labels = batch["mwt_labels"].to(device)
 
                     optimizer.zero_grad()
 
@@ -124,14 +185,17 @@ class TokenizerModel(BorgBaseModel):
                         dtype=config.dtype,
                         enabled=device_type == "cuda",
                     ):
-                        logits = model(
+                        boundary_logits, mwt_logits = model(
                             input_ids,
                             attention_mask,
-                        )  # (B, L, C)
+                        )
 
                         loss = loss_fn(
-                            logits.view(-1, TokenizerModel.NUM_LABELS),
+                            boundary_logits.view(-1, TokenizerModel.NUM_LABELS),
                             labels.view(-1),
+                        ) + loss_fn(
+                            mwt_logits.view(-1, 2),
+                            mwt_labels.view(-1),
                         )
 
                     loss.backward()
@@ -154,9 +218,8 @@ class TokenizerModel(BorgBaseModel):
 
                 avg_loss = state.total_loss / len(train_loader)
 
-                predicted_sentences = model.predict(
-                    tokenizer_validation_text(dev_sentences)
-                )
+                validation_text = tokenizer_validation_text(dev_sentences)
+                predicted_sentences = model.predict(validation_text)
 
                 metrics = evaluate_predictions(
                     dev_sentences,
@@ -165,9 +228,14 @@ class TokenizerModel(BorgBaseModel):
 
                 print(f"  loss={avg_loss:.4f}")
 
+                metrics["MWT"] = _mwt_surface_metrics(
+                    dev_sentences,
+                    predicted_sentences,
+                    validation_text,
+                )
                 print_validation_metrics(
                     metrics,
-                    ["Tokens", "Sentences"],
+                    ["Tokens", "Sentences", "MWT"],
                 )
 
                 score = average_f1(
@@ -218,10 +286,13 @@ class TokenizerModel(BorgBaseModel):
         score_sums = torch.zeros(
             (len(token_ids), self.NUM_LABELS)
         )
+        mwt_score_sums = torch.zeros((len(token_ids), 2))
         score_counts = torch.zeros(len(token_ids))
         batch_size = self.config.eval_batch_size
         if batch_size < 1:
             raise ValueError("eval_batch_size must be positive")
+        if device_type == "mps":
+            batch_size = 1
         window_starts = range(0, len(token_ids), window_step)
 
         with torch.inference_mode():
@@ -259,24 +330,35 @@ class TokenizerModel(BorgBaseModel):
                     dtype=self.config.dtype,
                     enabled=device_type == "cuda",
                 ):
-                    logits = self(
+                    model_outputs = self(
                         input_ids,
                         attention_mask,
-                    ).float().cpu()
+                    )
+                    boundary_logits, mwt_logits = model_outputs
+                    boundary_logits = boundary_logits.float().cpu()
+                    mwt_logits = mwt_logits.float().cpu()
 
                 for row, (start, window) in enumerate(zip(starts, windows)):
-                    special_mask = hf_tok.get_special_tokens_mask(
-                        window,
-                        already_has_special_tokens=False,
-                    )
+                    try:
+                        special_mask = hf_tok.get_special_tokens_mask(
+                            window,
+                            already_has_special_tokens=False,
+                        )
+                    except AssertionError:
+                        special_mask = hf_tok.get_special_tokens_mask(
+                            model_inputs[row]["input_ids"],
+                            already_has_special_tokens=True,
+                        )
                     content_positions = [
                         index for index, is_special in enumerate(special_mask)
                         if not is_special
                     ]
-                    score_sums[start:start + len(window)] += logits[row, content_positions]
+                    score_sums[start:start + len(window)] += boundary_logits[row, content_positions]
+                    mwt_score_sums[start:start + len(window)] += mwt_logits[row, content_positions]
                     score_counts[start:start + len(window)] += 1
 
         scores = score_sums / score_counts.unsqueeze(1)
+        mwt_scores = mwt_score_sums / score_counts.unsqueeze(1)
         character_positions = []
         subword_indices = []
         for index, (start, end) in enumerate(offset_mapping):
@@ -294,6 +376,9 @@ class TokenizerModel(BorgBaseModel):
         character_scores = scores.new_zeros((len(positions), self.NUM_LABELS))
         character_scores.index_add_(0, inverse, scores[subword_indices])
         labels = character_scores.argmax(-1).tolist()
+        character_mwt_scores = mwt_scores.new_zeros((len(positions), 2))
+        character_mwt_scores.index_add_(0, inverse, mwt_scores[subword_indices])
+        mwt_labels = character_mwt_scores.argmax(-1).tolist()
 
         first_character = next(
             (index for index, char in enumerate(text) if not char.isspace()),
@@ -302,16 +387,19 @@ class TokenizerModel(BorgBaseModel):
         if first_character is None:
             return []
 
-        boundaries = [(first_character, TokenizerDataset.SENTENCE_START)]
+        first_mwt_label = mwt_labels[0] if mwt_labels else 0
+        boundaries = [(first_character, TokenizerDataset.SENTENCE_START, first_mwt_label)]
         boundaries.extend(
-            (position, label)
-            for position, label in zip(positions.tolist()[1:], labels[1:])
+            (position, label, mwt_label)
+            for position, label, mwt_label in zip(
+                positions.tolist()[1:], labels[1:], mwt_labels[1:]
+            )
             if label != TokenizerDataset.CONTINUATION
         )
 
         sentences: List[Sentence] = []
         current_sentence = Sentence()
-        for index, (start, label) in enumerate(boundaries):
+        for index, (start, label, is_mwt) in enumerate(boundaries):
             if label == TokenizerDataset.SENTENCE_START and current_sentence.tokens:
                 sentences.append(current_sentence)
                 current_sentence = Sentence()
@@ -323,6 +411,7 @@ class TokenizerModel(BorgBaseModel):
                     id=len(current_sentence.tokens) + 1,
                     form="".join(token_text.split()),
                     space_after=token_text[-1].isspace(),
+                    is_mwt=bool(is_mwt),
                 )
             )
 

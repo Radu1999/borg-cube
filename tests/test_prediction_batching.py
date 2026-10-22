@@ -284,7 +284,7 @@ def make_tokenizer(batch_size):
         logits[..., 0] = 1
         logits[:, 1, 2] = 2
         logits[..., 1] = (ids % 3 == 0).float() * 3
-        return logits
+        return logits, torch.zeros((*ids.shape, 2))
 
     model.forward = Mock(side_effect=forward)
     return model
@@ -301,6 +301,18 @@ def test_tokenizer_batches_windows_and_preserves_overlap_predictions():
     batched.config.eval_batch_size = 0
     with pytest.raises(ValueError, match="eval_batch_size"):
         batched.predict(text)
+
+
+def test_tokenizer_limits_mps_prediction_to_one_window(monkeypatch):
+    model = make_tokenizer(3)
+    model.config.resolve_device = lambda: "mps"
+    model.to = Mock(return_value=model)
+    monkeypatch.setattr(torch.Tensor, "to", lambda tensor, *args, **kwargs: tensor)
+
+    model.predict("A B C D E F G H I J", show_progress=False)
+
+    assert model.forward.call_count == 7
+    assert all(call.args[0].size(0) == 1 for call in model.forward.call_args_list)
 
 
 @pytest.mark.parametrize("model_type", [TaggerModel, LemmatizerModel, ParserModel])

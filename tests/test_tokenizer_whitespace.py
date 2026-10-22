@@ -2,7 +2,7 @@ import torch
 from types import SimpleNamespace
 from unittest.mock import Mock
 from src.config import BorgConfig
-from src.models.tokenizer import TokenizerModel
+from src.models.tokenizer import TokenizerModel, _mwt_surface_metrics
 from src.data.conllu import Token, Sentence
 from src.models.evaluation import evaluate_predictions, tokenizer_validation_text
 
@@ -27,7 +27,7 @@ def test_tokenizer_whitespace():
         if L > 2: res[0, 2, 1] = 1 # B: TOKEN_START
         if L > 3: res[0, 3, 0] = 1 # .: CONT
         if L > 4: res[0, 4, 2] = 1 # C: SENTENCE_START
-        return res
+        return res, torch.zeros((*res.shape[:2], 2))
 
     model.forward = mock_forward.__get__(model, TokenizerModel)
 
@@ -90,7 +90,7 @@ def test_tokenizer_uses_overlapping_windows():
             observed_windows.append(input_ids[row, 1:length - 1].tolist())
             for i, token_id in enumerate(input_ids[row].tolist()):
                 logits[row, i, 2 if token_id == ord("a") else 0] = 1
-        return logits
+        return logits, torch.zeros((*logits.shape[:2], 2))
 
     model.forward = mock_forward
     text = "abcdefghijklmn"
@@ -156,7 +156,7 @@ def test_tokenizer_handles_subword_offsets_that_include_leading_whitespace():
                 logits[0, i, 1] = 1  # TOKEN_START
             else:
                 logits[0, i, 0] = 1  # CONTINUATION
-        return logits
+        return logits, torch.zeros((*logits.shape[:2], 2))
 
     model.forward = mock_forward
     sents = model.predict("A B")
@@ -202,7 +202,7 @@ def test_tokenizer_skips_whitespace_only_offsets():
         labels = {1000: 2, 1001: 1, 1002: 1}
         for i, token_id in enumerate(input_ids[0].tolist()):
             logits[0, i, labels.get(token_id, 0)] = 1
-        return logits
+        return logits, torch.zeros((*logits.shape[:2], 2))
 
     model.forward = mock_forward
     sentences = model.predict("A B")
@@ -216,7 +216,7 @@ def test_tokenizer_skips_whitespace_only_offsets():
     assert trailing_space[0].tokens[0].space_after is True
 
 
-def _predict_with_offsets(text, offsets, labels):
+def _predict_with_offsets(text, offsets, labels, mwt_labels=None):
     class FakeTokenizer:
         pad_token_id = 0
 
@@ -247,14 +247,44 @@ def _predict_with_offsets(text, offsets, labels):
 
     def mock_forward(input_ids, attention_mask):
         logits = torch.zeros((*input_ids.shape, TokenizerModel.NUM_LABELS))
+        mwt_logits = torch.zeros((*input_ids.shape, 2))
         for row, ids in enumerate(input_ids.tolist()):
             for position, token_id in enumerate(ids):
                 if token_id >= 1000:
-                    logits[row, position, labels[token_id - 1000]] = 10
-        return logits
+                    index = token_id - 1000
+                    logits[row, position, labels[index]] = 10
+                    mwt_logits[row, position, mwt_labels[index] if mwt_labels else 0] = 10
+        return logits, mwt_logits
 
     model.forward = mock_forward
     return model.predict(text, show_progress=False)
+
+
+def test_tokenizer_predicts_mwt_flag_on_surface_token():
+    predicted = _predict_with_offsets(
+        "du pain", [(0, 2), (3, 7)], [2, 1], [1, 0],
+    )
+
+    assert [(token.form, token.is_mwt) for token in predicted[0].surface_tokens()] == [
+        ("du", True),
+        ("pain", False),
+    ]
+
+
+def test_mwt_metrics_compare_surface_spans_not_expanded_words():
+    gold = [Sentence(tokens=[
+        Token(id="1-2", form="du"),
+        Token(id=1, form="de"),
+        Token(id=2, form="le"),
+        Token(id=3, form="pain"),
+    ])]
+    predicted = _predict_with_offsets(
+        "du pain", [(0, 2), (3, 7)], [2, 1], [1, 0],
+    )
+
+    metrics = _mwt_surface_metrics(gold, predicted, "du pain")
+    assert (metrics.precision, metrics.recall, metrics.f1) == (1.0, 1.0, 1.0)
+    assert (metrics.gold_count, metrics.system_count) == (1, 1)
 
 
 def test_tokenizer_decodes_duplicate_boundaries_once():
