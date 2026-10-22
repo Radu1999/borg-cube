@@ -29,7 +29,7 @@ def _make_dataset(text, char_labels, offset_mapping):
             }
 
     ds.hf_tok = FakeTokenizer()
-    ds.examples = [(text, char_labels)]
+    ds.examples = [(text, char_labels, [-100] * len(char_labels))]
     return ds
 
 
@@ -76,7 +76,13 @@ def test_training_labels_use_multiword_surface_tokens():
 
     dataset._build_examples(sentences)
 
-    assert dataset.examples == [("du. Next ", [2, 0, 1, 0, 2, 0, 0, 0, 0])]
+    assert dataset.examples == [
+        (
+            "du. Next ",
+            [2, 0, 1, 0, 2, 0, 0, 0, 0],
+            [1, -100, 0, -100, 0, -100, -100, -100, -100],
+        )
+    ]
 
 
 if __name__ == "__main__":

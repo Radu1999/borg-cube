@@ -48,3 +48,26 @@ def test_set_extras_loads_saved_weights():
 
     for p1, p2 in zip(obj.classifier.parameters(), source.parameters()):
         assert (p1 == p2).all()
+
+
+def test_set_extras_loads_mwt_head_weights():
+    obj = _make_bare_instance()
+    source = nn.Linear(obj.hidden_size, 2)
+
+    obj._set_extras({
+        "classifier": nn.Linear(obj.hidden_size, TokenizerModel.NUM_LABELS).state_dict(),
+        "mwt_classifier": source.state_dict(),
+    })
+
+    for actual, expected in zip(obj.mwt_classifier.parameters(), source.parameters()):
+        assert (actual == expected).all()
+
+
+def test_set_extras_defaults_missing_mwt_head_to_non_mwt():
+    obj = _make_bare_instance()
+    obj._set_extras({
+        "classifier": nn.Linear(obj.hidden_size, TokenizerModel.NUM_LABELS).state_dict(),
+    })
+
+    assert not obj.mwt_classifier.weight.any()
+    assert not obj.mwt_classifier.bias.any()

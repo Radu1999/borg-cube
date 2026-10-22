@@ -2,6 +2,7 @@ import torch
 
 from src.data.dataset import (
     LemmatizerDataset,
+    MWTDataset,
     ParserDataset,
     TaggerDataset,
     TokenizerDataset,
@@ -29,19 +30,22 @@ def test_tokenizer_collate_pads_tokenizer_outputs():
                 "input_ids": torch.tensor([1, 2]),
                 "attention_mask": torch.tensor([1, 1]),
                 "labels": torch.tensor([2, 0]),
+                "mwt_labels": torch.tensor([1, -100]),
             },
             {
                 "input_ids": torch.tensor([3]),
                 "attention_mask": torch.tensor([1]),
                 "labels": torch.tensor([1]),
+                "mwt_labels": torch.tensor([0]),
             },
         )
     )
 
-    assert set(batch) == {"input_ids", "attention_mask", "labels"}
+    assert set(batch) == {"input_ids", "attention_mask", "labels", "mwt_labels"}
     assert batch["input_ids"].tolist() == [[1, 2], [3, 99]]
     assert batch["attention_mask"].tolist() == [[1, 1], [1, 0]]
     assert batch["labels"].tolist() == [[2, 0], [1, -100]]
+    assert batch["mwt_labels"].tolist() == [[1, -100], [0, -100]]
 
 
 def test_tagger_collate_pads_tagger_outputs():
@@ -111,6 +115,29 @@ def test_lemmatizer_collate_pads_inputs_and_targets():
     assert batch["output_char_ids"].shape == (2, 2, 3)
     assert batch["input_char_ids"][1, 1].tolist() == [0, 0, 0]
     assert batch["output_char_ids"][1, 1].tolist() == [-100, -100, -100]
+
+
+def test_mwt_collate_pads_only_source_and_expansion_sequences():
+    dataset = _dataset(MWTDataset)
+    batch = dataset.collate_fn(
+        _batch(
+            {
+                "input_char_ids": torch.tensor([2, 4, 3]),
+                "output_char_ids": torch.tensor([2, 5, 3]),
+            },
+            {
+                "input_char_ids": torch.tensor([2, 6, 7, 3]),
+                "output_char_ids": torch.tensor([2, 8, 9, 10, 3]),
+            },
+        )
+    )
+
+    assert set(batch) == {"input_char_ids", "output_char_ids"}
+    assert batch["input_char_ids"].tolist() == [[2, 4, 3, 0], [2, 6, 7, 3]]
+    assert batch["output_char_ids"].tolist() == [
+        [2, 5, 3, -100, -100],
+        [2, 8, 9, 10, 3],
+    ]
 
 
 def test_parser_collate_pads_parser_outputs():
