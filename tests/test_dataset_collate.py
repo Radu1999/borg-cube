@@ -2,6 +2,7 @@ import torch
 
 from src.data.dataset import (
     LemmatizerDataset,
+    MWTDataset,
     ParserDataset,
     TaggerDataset,
     TokenizerDataset,
@@ -114,6 +115,29 @@ def test_lemmatizer_collate_pads_inputs_and_targets():
     assert batch["output_char_ids"].shape == (2, 2, 3)
     assert batch["input_char_ids"][1, 1].tolist() == [0, 0, 0]
     assert batch["output_char_ids"][1, 1].tolist() == [-100, -100, -100]
+
+
+def test_mwt_collate_pads_only_source_and_expansion_sequences():
+    dataset = _dataset(MWTDataset)
+    batch = dataset.collate_fn(
+        _batch(
+            {
+                "input_char_ids": torch.tensor([2, 4, 3]),
+                "output_char_ids": torch.tensor([2, 5, 3]),
+            },
+            {
+                "input_char_ids": torch.tensor([2, 6, 7, 3]),
+                "output_char_ids": torch.tensor([2, 8, 9, 10, 3]),
+            },
+        )
+    )
+
+    assert set(batch) == {"input_char_ids", "output_char_ids"}
+    assert batch["input_char_ids"].tolist() == [[2, 4, 3, 0], [2, 6, 7, 3]]
+    assert batch["output_char_ids"].tolist() == [
+        [2, 5, 3, -100, -100],
+        [2, 8, 9, 10, 3],
+    ]
 
 
 def test_parser_collate_pads_parser_outputs():

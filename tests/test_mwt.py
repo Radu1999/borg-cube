@@ -1,9 +1,11 @@
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import torch
 from torch import nn
 
+from src.config import BorgConfig
 from src.data.conllu import Sentence, Token
 from src.data.dataset import MWTDataset
 from src.models.mwt import MWTModel, _mwt_precision_recall
@@ -76,50 +78,76 @@ def test_mwt_dataset_builds_expansion_and_identity_targets():
     assert targets == {"1-2": "In Dem"}
 
 
-def test_mwt_dataset_emits_source_character_ids():
+def test_mwt_dataset_returns_only_mwt_character_pairs():
     dataset = MWTDataset.__new__(MWTDataset)
-    dataset.sentences = [make_mwt_sentence()]
-    dataset.max_length = 32
-    dataset.hf_tok = StubHFTokenizer()
+    dataset.examples = [("im", "In Dem")]
     specials = {"<PAD>": 0, "<UNK>": 1, "<SOS>": 2, "<EOS>": 3}
     dataset.input_vocab = {**specials, "g": 4, "e": 5, "h": 6, "i": 7, "m": 8, "t": 9}
     dataset.output_vocab = {**specials, **{char: index + 4 for index, char in enumerate(" DemInght")}}
 
     first = dataset[0]
-    assert first["input_ids"].tolist() == [1, 4, 5, 2]
-    assert len(first["input_char_ids"]) == 2
-    assert len(first["output_char_ids"]) == 2
+    assert first["input_char_ids"].tolist() == [2, 7, 8, 3]
+    assert first["output_char_ids"].tolist() == [2, 8, 9, 4, 5, 6, 7, 3]
     batch = dataset.collate_fn([first])
-    assert batch["input_char_ids"].shape[:2] == (1, 2)
-    assert batch["output_char_ids"].shape[:2] == (1, 2)
-    assert "upos_ids" not in batch
+    assert batch["input_char_ids"].shape == (1, 4)
+    assert batch["output_char_ids"].shape == (1, 8)
 
 
-def test_mwt_forward_encodes_sentences_once_and_aligns_token_slots():
-    model = MWTModel.__new__(MWTModel)
-    nn.Module.__init__(model)
-    model.output_vocab = {"<PAD>": 0, "<UNK>": 1, "<SOS>": 2, "<EOS>": 3, "a": 4}
-    model.input_vocab = {"<PAD>": 0, "<UNK>": 1, "<SOS>": 2, "<EOS>": 3, "a": 4}
-    model.encoder = SimpleNamespace(config=SimpleNamespace(hidden_size=8))
-    model._build_heads()
-    model.encode = Mock(return_value=torch.randn(2, 4, 8))
-
-    outputs = model(
-        torch.tensor([[1, 4, 4, 2], [1, 4, 2, 0]]),
-        torch.tensor([[1, 1, 1, 1], [1, 1, 1, 0]]),
-        torch.tensor([
-            [[2, 4, 3], [2, 4, 3]],
-            [[2, 4, 3], [2, 3, 0]],
-        ]),
-        torch.tensor([
-            [[2, 4, 3], [2, 4, 3]],
-            [[2, 4, 3], [2, 3, -100]],
-        ]),
+def test_mwt_dataset_contains_only_tokens_with_expansions():
+    dataset = MWTDataset(
+        [make_mwt_sentence()],
+        output_vocab=None,
+        input_vocab=None,
     )
 
-    assert model.encode.call_count == 1
-    assert outputs["logits"].shape[0] == 4
-    assert outputs["logits"].shape[-1] == len(model.output_vocab)
+    assert len(dataset) == 1
+    assert dataset.examples == [("im", "In Dem")]
+
+
+def test_mwt_forward_uses_only_character_sequences():
+    vocab = {"<PAD>": 0, "<UNK>": 1, "<SOS>": 2, "<EOS>": 3, "a": 4}
+    model = MWTModel(BorgConfig(), vocab, vocab)
+
+    outputs = model(
+        torch.tensor([[2, 4, 3], [2, 4, 3]]),
+        torch.tensor([[2, 4, 3], [2, 3, -100]]),
+    )
+
+    assert not hasattr(model, "encoder")
+    assert outputs["logits"].shape == (2, 2, len(vocab))
+
+
+def test_mwt_model_checkpoint_round_trip_has_no_encoder_dependency():
+    vocab = {"<PAD>": 0, "<UNK>": 1, "<SOS>": 2, "<EOS>": 3, "a": 4}
+    model = MWTModel(BorgConfig(), vocab, vocab)
+
+    with tempfile.TemporaryDirectory() as path:
+        model.save(path)
+        loaded = MWTModel.load(path)
+
+    assert not hasattr(loaded, "encoder")
+    assert loaded.input_vocab == vocab
+    assert loaded.output_vocab == vocab
+
+
+def test_mwt_inference_decodes_only_flagged_tokens():
+    vocab = {"<PAD>": 0, "<UNK>": 1, "<SOS>": 2, "<EOS>": 3, "i": 4, "m": 5}
+    model = MWTModel(
+        BorgConfig(device="cpu"),
+        input_vocab=vocab,
+        output_vocab=vocab,
+    )
+    model.forward = Mock(return_value={"strings": ["In Dem"]})
+    sentence = Sentence(tokens=[
+        Token(id=1, form="im", is_mwt=True),
+        Token(id=2, form="gehe"),
+    ])
+
+    expansions = model._predict_expansions([sentence], show_progress=False)
+
+    assert expansions == [["In Dem", "gehe"]]
+    model.forward.assert_called_once()
+    assert model.forward.call_args.args[0].shape[0] == 1
 
 
 def test_mwt_prediction_inserts_range_and_component_rows():
@@ -129,7 +157,10 @@ def test_mwt_prediction_inserts_range_and_component_rows():
     model._predict_expansions = Mock(return_value=[["In Dem", "gehe"]])
     sentence = Sentence(
         comments=["# text = im gehe"],
-        tokens=[Token(id=1, form="im"), Token(id=2, form="gehe", space_after=False)],
+        tokens=[
+            Token(id=1, form="im", is_mwt=True),
+            Token(id=2, form="gehe", space_after=False),
+        ],
     )
 
     result = model.predict([sentence], show_progress=False)[0]
