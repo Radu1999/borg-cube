@@ -10,8 +10,11 @@ Supports:
 from __future__ import annotations
 
 import re
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Union
+
+from tqdm import tqdm
 
 
 @dataclass
@@ -145,48 +148,59 @@ def _parse_head(head_str: str) -> Optional[int]:
 # Public API
 # ---------------------------------------------------------------------------
 
-def read_conllu(path: str) -> List[Sentence]:
+def read_conllu(path: str, *, show_progress: bool = False) -> List[Sentence]:
     """Read a CoNLL-U file and return a list of Sentence objects."""
     sentences: List[Sentence] = []
     current_tokens: List[Token] = []
     current_comments: List[str] = []
 
-    with open(path, encoding="utf-8") as fh:
-        for raw_line in fh:
-            line = raw_line.rstrip("\n")
-            if line.startswith("#"):
-                current_comments.append(line)
-            elif line == "":
-                if current_tokens:
-                    sentences.append(Sentence(tokens=current_tokens, comments=current_comments))
-                current_tokens = []
-                current_comments = []
-            else:
-                parts = line.split("\t")
-                if len(parts) != 10:
-                    continue  # skip malformed lines
+    with open(path, encoding="utf-8", newline="") as fh:
+        progress = tqdm(
+            total=os.path.getsize(path),
+            desc=f"Loading {os.path.basename(path)}",
+            unit="B",
+            unit_scale=True,
+            disable=not show_progress,
+        )
+        try:
+            for raw_line in fh:
+                progress.update(len(raw_line.encode("utf-8")))
+                line = raw_line.rstrip("\r\n")
+                if line.startswith("#"):
+                    current_comments.append(line)
+                elif line == "":
+                    if current_tokens:
+                        sentences.append(Sentence(tokens=current_tokens, comments=current_comments))
+                    current_tokens = []
+                    current_comments = []
+                else:
+                    parts = line.split("\t")
+                    if len(parts) != 10:
+                        continue  # skip malformed lines
 
-                misc = parts[9]
-                space_after = True
-                if "SpaceAfter=No" in misc:
-                    space_after = False
-                elif "SpaceAfter=Yes" in misc:
+                    misc = parts[9]
                     space_after = True
+                    if "SpaceAfter=No" in misc:
+                        space_after = False
+                    elif "SpaceAfter=Yes" in misc:
+                        space_after = True
 
-                tok = Token(
-                    id=_parse_id(parts[0]),
-                    form=parts[1],
-                    lemma=parts[2],
-                    upos=parts[3],
-                    xpos=parts[4],
-                    feats=_parse_feats(parts[5]),
-                    head=_parse_head(parts[6]),
-                    deprel=parts[7],
-                    deps=parts[8],
-                    misc=misc,
-                    space_after=space_after,
-                )
-                current_tokens.append(tok)
+                    tok = Token(
+                        id=_parse_id(parts[0]),
+                        form=parts[1],
+                        lemma=parts[2],
+                        upos=parts[3],
+                        xpos=parts[4],
+                        feats=_parse_feats(parts[5]),
+                        head=_parse_head(parts[6]),
+                        deprel=parts[7],
+                        deps=parts[8],
+                        misc=misc,
+                        space_after=space_after,
+                    )
+                    current_tokens.append(tok)
+        finally:
+            progress.close()
 
     # Handle file without trailing newline
     if current_tokens:

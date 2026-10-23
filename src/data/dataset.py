@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
+from tqdm import tqdm
 from src.data.conllu import Sentence, Token
 
 
@@ -47,11 +48,12 @@ class TokenizerDataset(Dataset):
         sentences: List[Sentence],
         hf_tokenizer_name: str,
         max_length: int = 512,
+        show_progress: bool = False,
     ):
         self.max_length = max_length
-        self.hf_tok = _load_tokenizer(hf_tokenizer_name)
-        self.examples: List[Tuple[str, List[int], List[int]]] = []
-        self._build_examples(sentences)
+        self.hf_tok = AutoTokenizer.from_pretrained(hf_tokenizer_name)
+        self.examples: List[Tuple[str, List[int]]] = []
+        self._build_examples(sentences, show_progress=show_progress)
 
     def collate_fn(self, batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         padding_values = {
@@ -69,7 +71,7 @@ class TokenizerDataset(Dataset):
             for key, padding_value in padding_values.items()
         }
 
-    def _build_examples(self, sentences: List[Sentence]) -> None:
+    def _build_examples(self, sentences: List[Sentence], *, show_progress: bool = False) -> None:
         chars: List[str] = []
         labels: List[int] = []
         mwt_labels: List[int] = []
@@ -81,7 +83,12 @@ class TokenizerDataset(Dataset):
                 labels.clear()
                 mwt_labels.clear()
 
-        for sent in sentences:
+        for sent in tqdm(
+            sentences,
+            desc="Preparing tokenizer data",
+            unit="sentences",
+            disable=not show_progress,
+        ):
             tokens = sent.surface_tokens()
             if not tokens:
                 continue

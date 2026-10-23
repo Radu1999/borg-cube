@@ -140,6 +140,7 @@ class TokenizerModel(BorgBaseModel):
             train_sentences,
             config.model_name,
             config.max_seq_length,
+            show_progress=True,
         )
 
         train_loader = DataLoader(

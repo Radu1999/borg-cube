@@ -51,8 +51,8 @@ class BorgPipeline:
         resume: bool = False,
     ) -> None:
         """Train a component, optionally resuming its last checkpoint."""
-        train_sentences = read_conllu(train_file)
-        dev_sentences = read_conllu(dev_file)
+        train_sentences = read_conllu(train_file, show_progress=True)
+        dev_sentences = read_conllu(dev_file, show_progress=True)
         component_path = os.path.join(model_path, component)
 
         if component == "tokenizer":
