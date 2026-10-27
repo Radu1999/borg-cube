@@ -35,8 +35,8 @@ class LemmatizerModel(BorgBaseModel):
         self,
         config: BorgConfig,
         upos_vocab: Optional[Dict[str, int]] = None,
-        output_vocab: Optional[Dict[str, int]] = None,
         input_vocab: Optional[Dict[str, int]] = None,
+        output_vocab: Optional[Dict[str, int]] = None,
     ):
         super().__init__(config, "lemmatizer")
 
